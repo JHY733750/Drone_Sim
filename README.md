@@ -41,12 +41,17 @@ make viz REFERENCE=lemniscate RADIUS=2.0 PERIOD=6   # built-in path, no planner
 make viz REFERENCE=hover                             # sit still at ALTITUDE (1.5 m)
 make viz WORLD=fence3d PLAN=plans/fence3d_N8_seg2.json   # fly a solved plan
 make viz WORLD=loiter PLAN=plans/loiter_N8_seg16.json STATE=truth
+make viz SRC_ATTITUDE=truth SRC_BODY_RATE=truth     # truth for some fields only
 ```
 
 Defaults: `WORLD=empty REFERENCE=circle RADIUS=1.0 PERIOD=3.5 ALTITUDE=1.5
 STATE=est`. A plan's `WORLD` must be the scenario it was solved in, or the
 launch refuses. `loiter` needs `STATE=truth`: it flies at 62.5 m and the
 estimator's velocity aiding only works below 3 m (see *Scope*).
+`STATE` sets all four state fields; `SRC_POSITION`, `SRC_VELOCITY`,
+`SRC_ATTITUDE`, `SRC_BODY_RATE` (`est` | `truth`) override one each — see
+*Choosing the state source* in [docs/INTERFACE.md](docs/INTERFACE.md). Truth
+there is the physics engine's exact state, `/drone/truth_exact`.
 
 Planner side:
 
@@ -288,12 +293,25 @@ across three runs (7.19 cm RMSE before the integral term, 8.36 cm after it,
 each repeatable to 0.01 mm). Nothing on its control path changed when the estimator was added
 (`git diff` on `dsim_control`, the gains and the vehicle is empty), so that
 offset was always there at this bank; the earlier table is a 3° lap, where it
-is small. It is **not explained yet**. The one hypothesis on the table is the
+is small. It is **not explained yet**. The one hypothesis on the table was the
 velocity in `/drone/truth`, which comes from the same pose-differentiating
 `OdometryPublisher` that produced the body-rate bug below; a lag there enters
-the velocity loop as an inward force proportional to centripetal acceleration,
-which is the right direction and roughly the right size. The estimate takes
-velocity from the accelerometer, corrected by flow, and shows no such offset.
+the velocity loop as an inward force proportional to centripetal acceleration.
+The estimate takes velocity from the accelerometer, corrected by flow, and
+shows no such offset.
+
+What that velocity actually is, read from the plugin binary
+(`libgz-sim8-odometry-publisher-system` 8.15.0) rather than assumed: the pose
+is differenced **every physics step** and the published twist is the mean of
+the last **10** differences — the window is hard-coded (`mov $0xa,%esi` before
+each `RollingMean::SetWindowSize`) and the publish throttle sits after the
+push. At the 1 ms step that is a 10 ms boxcar, about **5 ms** of lag. Through
+`kv/kp` that predicts a radial offset of `kv·a·τ/kp` ≈ 4 × 2.2 × 0.005 / 6 ≈
+**0.7 cm** on this lap — the right direction but an order of magnitude short
+of 6 cm, so the lag alone does not explain it. Those `state:=truth` rows were
+flown on that lagged velocity and the gyro; `state:=truth` now means
+`/drone/truth_exact` (exact engine state, below), so they need re-measuring
+before they are quoted again.
 
 Independent cross-checks that the plant, mixer and config agree:
 mean rotor speed in hover measured **638.4 rad/s** against the generator's
@@ -327,7 +345,10 @@ tracking error).
   (flipped yaw torque, swapped roll/pitch, dropped feedforward, inverted
   position error, faked arm length, a rotor swapped in the layout table), the
   overlay geometry (unrotated body vectors, a flipped aero residual, an arrow
-  decoupled from its rotor, a doubly-rotated velocity), the sensor models, the
+  decoupled from its rotor, a doubly-rotated velocity), the sensor models, the per-field state
+  sources (a field served from the other source, a velocity rotated with the
+  other source's attitude, a truth rate filtered or differentiated from the
+  pose, slam accepted, a stale source ignored), the
   playback pacer, the restart detector, the referee's moving-obstacle
   clearance (motion ignored, de Casteljau stopped a step early, an obstacle's
   active window ignored, a column scored as a ball, penetration clamped to
@@ -342,11 +363,12 @@ tracking error).
   fails if the tests do not notice. A green suite is only evidence if it would have gone red on a wrong
   implementation.
 
-  Currently **134 C++ + 171 Python + 30 viewer tests pass, 133/133 injected
-  bugs caught, 0 skipped.** (C++: 39 control, 27 sensors, 26 referee geometry
-  and line of sight, 21 estimation, 13 pacer, 8 epoch. Python: 30 overlay
+  Currently **146 C++ + 171 Python + 30 viewer tests pass, 149/149 injected
+  bugs caught, 0 skipped.** (C++: 47 control including the per-field state
+  sources, 27 sensors, 26 referee geometry and line of sight, 21 estimation,
+  13 pacer, 8 epoch, 4 truth plugin. Python: 30 overlay
   geometry, 44 simulation control, 24 solve endpoint, 39 launch endpoint, 34
-  planner conversion and bridge. `colcon test-result` adds 6 to the C++ figure:
+  planner conversion and bridge. `colcon test-result` adds 7 to the C++ figure:
   it counts the ctest wrappers as well as the cases inside them.)
 
   Three rules keep the harness honest, all added after it lied. A mutation whose
@@ -397,11 +419,15 @@ accelerometer's gravity, yaw toward the compass), velocity from the
 accelerometer integrated in the world frame and pulled toward optical flow
 horizontally and the rangefinder vertically, body rate straight from the gyro.
 **Position is still ground truth**, behind a `position_source` parameter that
-accepts nothing else yet — that is the seam where a SLAM/VIO emulator plugs in.
+accepts nothing else yet — that is the seam where a SLAM/VIO emulator plugs in
+(the controller already accepts `src_position:=slam` as a name and refuses it
+at startup until `/slam/odom` is wired).
 Measured live on the 18° lap: 1.0° of tilt error (the analytic value for the
 accelerometer correction in a coordinated turn is 0.985°), 0.1° of yaw, 3 cm/s
 of velocity. Details and known weaknesses in [docs/INTERFACE.md](docs/INTERFACE.md)
-under *State estimate*; `state:=truth` flies on perfect state for comparison.
+under *State estimate*; `state:=truth` flies on perfect state for comparison,
+and `src_position` / `src_velocity` / `src_attitude` / `src_body_rate` put any
+one field on truth while the rest stay on the estimate.
 
 **Out:** position estimation, motor identification, matching a real airframe's
 numbers. The controller's model of the vehicle is exactly right and its
@@ -445,7 +471,9 @@ and every test passed. It surfaced only because the force overlays put a number
 on the commanded torque and the number was exactly the arithmetic saturation
 limit.
 
-Body rates now come from the gyro, and `BodyRateSource` rejects any sample a
+Body rates now come from the gyro — or, with `src_body_rate:=truth`, from the
+physics engine's own angular velocity on `/drone/truth_exact`, which is read,
+not differentiated — and `BodyRateSource` rejects any sample a
 1.5 kg quadrotor could not physically produce. Both are tested, and the
 saturation is gone: 0 events in 7500 control steps where there used to be 22.
 

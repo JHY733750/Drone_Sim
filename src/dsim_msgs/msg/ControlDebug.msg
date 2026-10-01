@@ -80,3 +80,13 @@ bool tilt_clamped                # the demand was more aggressive than allowed
 # whole reason it exists.
 geometry_msgs/Vector3 integral_force_n
 bool integral_held               # true while anti-windup is holding it still
+
+# Where each field of the state this step flew on came from: "est" or "truth".
+# est = /drone/state_est (position, velocity, attitude) and the /drone/imu gyro
+# (body rate); truth = /drone/truth_exact, the physics engine's own state. Set
+# once at startup from state:= and the src_* launch overrides, and stamped on
+# every message -- including idle ones -- so a recording proves what it used.
+string source_position
+string source_velocity
+string source_attitude
+string source_body_rate

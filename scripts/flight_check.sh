@@ -31,6 +31,15 @@ PERIOD="${PERIOD:-6.0}"
 # est flies on the sensor-based estimate (the launch default); truth is the
 # control run, same lap, so the two RMSEs in the README are comparable.
 STATE="${STATE:-est}"
+# Per-field overrides of STATE, each est | truth (SRC_POSITION also takes
+# slam, which the controller refuses until it is wired). Empty follows STATE.
+# SRC_ATTITUDE=truth SRC_BODY_RATE=truth flies the rotational loop on exact
+# state while position and velocity stay on the estimate.
+SRC_ARGS=""
+[ -n "${SRC_POSITION:-}" ]  && SRC_ARGS="$SRC_ARGS src_position:=$SRC_POSITION"
+[ -n "${SRC_VELOCITY:-}" ]  && SRC_ARGS="$SRC_ARGS src_velocity:=$SRC_VELOCITY"
+[ -n "${SRC_ATTITUDE:-}" ]  && SRC_ARGS="$SRC_ARGS src_attitude:=$SRC_ATTITUDE"
+[ -n "${SRC_BODY_RATE:-}" ] && SRC_ARGS="$SRC_ARGS src_body_rate:=$SRC_BODY_RATE"
 WEB_PORT="${WEB_PORT:-8080}"
 
 source /opt/ros/jazzy/setup.bash
@@ -60,7 +69,7 @@ if pgrep -f "$SIM_PROCS" >/dev/null 2>&1; then
   exit 1
 fi
 
-echo "== launching ($WORLD, $REFERENCE, state=$STATE, headless) =="
+echo "== launching ($WORLD, $REFERENCE, state=$STATE$SRC_ARGS, headless) =="
 # setsid so the whole launch tree is one process group we can signal as a unit.
 # The viewer is its own launch now (see viz.launch.py): this script reads the
 # run through its /snapshot endpoint, so it has to bring one up itself. Started
@@ -71,7 +80,7 @@ VIZ_PID=$!
 
 setsid ros2 launch dsim_bringup sim.launch.py \
     world:="$WORLD" reference:="$REFERENCE" gui:=false \
-    radius:="$RADIUS" period:="$PERIOD" state:="$STATE" \
+    radius:="$RADIUS" period:="$PERIOD" state:="$STATE" $SRC_ARGS \
     >/tmp/flight_check.log 2>&1 &
 LAUNCH_PID=$!
 

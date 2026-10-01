@@ -1,7 +1,8 @@
 // Controller node: turns a planner's trajectory into rotor speeds.
 //
-//   /drone/truth       (nav_msgs/Odometry)      pose + linear velocity
-//   /drone/imu         (sensor_msgs/Imu)        body angular rate (gyro)
+//   /drone/state_est   (nav_msgs/Odometry)      estimated pose + velocity  } which of these
+//   /drone/truth_exact (nav_msgs/Odometry)      exact physics state        } feeds each field
+//   /drone/imu         (sensor_msgs/Imu)        gyro, for body_rate=est    } is per field
 //   /drone/trajectory  (dsim_msgs/Trajectory) planner input  <-- YOUR PLANNER
 //        |
 //        v  SE(3) geometric control + mixer
@@ -12,12 +13,20 @@
 // tracking error is measured against what the controller actually chased, not
 // against a re-interpolation done elsewhere.
 //
-// The angular rate comes from the GYRO, not from the pose. Gazebo's
+// Each of position, velocity, attitude and body rate is taken from the
+// estimate or from ground truth independently -- the state.source.* parameters,
+// resolved and validated in ONE place (StateSources::fromNames, state_mux.hpp),
+// logged once at startup and stamped on every /drone/control_debug message, so
+// a run's own telemetry says what it flew on.
+//
+// The angular rate never comes from a differentiated pose. Gazebo's
 // OdometryPublisher is a wheeled-robot plugin that reconstructs velocity by
 // differencing successive poses; a quaternion and its negation are the same
 // rotation, so once per revolution its reported angular velocity jumped from
 // 1.8 to 626 rad/s while the pose stayed perfectly smooth. See
-// body_rate_source.hpp for what that did to the torque demand.
+// body_rate_source.hpp for what that did to the torque demand. body_rate=est
+// is the gyro; body_rate=truth is the physics engine's own angular velocity
+// from the dsim_truth plugin, which does not differentiate anything.
 //
 // /drone/control_debug carries what every loop of the cascade demanded and what
 // the rotors could deliver. It is what lets the viewer draw the control action
@@ -38,10 +47,10 @@
 #include <dsim_msgs/msg/trajectory.hpp>
 #include <dsim_msgs/msg/trajectory_setpoint.hpp>
 
-#include "dsim_control/body_rate_source.hpp"
 #include <dsim_time/sim_epoch.hpp>
 #include "dsim_control/mixer.hpp"
 #include "dsim_control/se3_controller.hpp"
+#include "dsim_control/state_mux.hpp"
 #include "dsim_control/trajectory_buffer.hpp"
 
 using namespace std::chrono_literals;
@@ -95,7 +104,6 @@ public:
     // filter that is not needed only adds phase lag to the fastest loop.
     // config/drone.yaml turns it on when the IMU has noise configured.
     const double gyro_tau = declare_parameter("state.gyro_lowpass_tau_s", 0.0);
-    rate_source_ = std::make_unique<BodyRateSource>(max_body_rate, gyro_tau);
     imu_timeout_s_ = declare_parameter("imu_timeout_s", 0.5);
     start_armed_     = declare_parameter("start_armed", true);
     armed_ = start_armed_;
@@ -104,7 +112,29 @@ public:
     // OdometryPublisher follows that. Kept as a parameter because getting this
     // wrong is silent at hover and only shows up in banked flight — see
     // scripts/check_twist_frame.py, which measures it instead of assuming.
-    twist_in_body_frame_ = declare_parameter("odom.twist_in_body_frame", true);
+    const bool twist_in_body_frame = declare_parameter("odom.twist_in_body_frame", true);
+
+    // ---- where each field of the state comes from -------------------------
+    // The launch resolves state:= and the src_* overrides into these four; the
+    // defaults reproduce state:=est. Validation -- including the refusal of
+    // position=slam until it is wired -- is StateSources::fromNames, and a
+    // refusal here stops the node rather than flying on a fallback.
+    const std::string src_pos = declare_parameter("state.source.position", std::string("est"));
+    const std::string src_vel = declare_parameter("state.source.velocity", std::string("est"));
+    const std::string src_att = declare_parameter("state.source.attitude", std::string("est"));
+    const std::string src_rate = declare_parameter("state.source.body_rate", std::string("est"));
+    const std::string truth_topic =
+      declare_parameter("state.truth_topic", std::string("/drone/truth_exact"));
+    const std::string est_topic =
+      declare_parameter("state.est_topic", std::string("/drone/state_est"));
+    StateSources sources;
+    try {
+      sources = StateSources::fromNames(src_pos, src_vel, src_att, src_rate);
+    } catch (const std::invalid_argument & e) {
+      RCLCPP_FATAL(get_logger(), "%s", e.what());
+      throw;
+    }
+    mux_ = std::make_unique<StateMux>(sources, twist_in_body_frame, max_body_rate, gyro_tau);
 
     controller_ = std::make_unique<SE3Controller>(g);
     mixer_ = std::make_unique<Mixer>(arm_length, moment_const, motor_const, max_rot_vel);
@@ -112,14 +142,32 @@ public:
     runSelfTest(g);
 
     // ---- interfaces -------------------------------------------------------
+    // Only the sources actually selected are subscribed, so each staleness
+    // check guards something the loop is really flying on.
     const auto qos = rclcpp::SensorDataQoS();
-    odom_sub_ = create_subscription<nav_msgs::msg::Odometry>(
-      "/drone/truth", qos,
-      [this](nav_msgs::msg::Odometry::SharedPtr msg) {onOdom(*msg);});
-
-    imu_sub_ = create_subscription<sensor_msgs::msg::Imu>(
-      "/drone/imu", qos,
-      [this](sensor_msgs::msg::Imu::SharedPtr msg) {onImu(*msg);});
+    if (sources.uses(Source::Truth)) {
+      truth_sub_ = create_subscription<nav_msgs::msg::Odometry>(
+        truth_topic, qos,
+        [this](nav_msgs::msg::Odometry::SharedPtr msg) {onTruth(*msg);});
+    }
+    if (sources.usesEstOdometry()) {
+      est_sub_ = create_subscription<nav_msgs::msg::Odometry>(
+        est_topic, qos,
+        [this](nav_msgs::msg::Odometry::SharedPtr msg) {onEst(*msg);});
+    }
+    if (sources.usesGyro()) {
+      imu_sub_ = create_subscription<sensor_msgs::msg::Imu>(
+        "/drone/imu", qos,
+        [this](sensor_msgs::msg::Imu::SharedPtr msg) {onImu(*msg);});
+    }
+    source_names_[0] = toString(sources.position);
+    source_names_[1] = toString(sources.velocity);
+    source_names_[2] = toString(sources.attitude);
+    source_names_[3] = toString(sources.body_rate);
+    RCLCPP_INFO(
+      get_logger(), "state sources: %s  (est = %s%s, truth = %s)",
+      sources.describe().c_str(), est_topic.c_str(),
+      sources.usesGyro() ? " + /drone/imu gyro" : "", truth_topic.c_str());
 
     traj_sub_ = create_subscription<dsim_msgs::msg::Trajectory>(
       "/drone/trajectory", rclcpp::QoS(4),
@@ -224,53 +272,67 @@ private:
       worst, mixer_->conditionNumber(), util * 100.0);
   }
 
-  void onOdom(const nav_msgs::msg::Odometry & msg)
+  static OdomSample unpack(const nav_msgs::msg::Odometry & msg)
   {
-    State s;
+    OdomSample s;
     s.position = Eigen::Vector3d(
       msg.pose.pose.position.x, msg.pose.pose.position.y, msg.pose.pose.position.z);
     s.orientation = Eigen::Quaterniond(
       msg.pose.pose.orientation.w, msg.pose.pose.orientation.x,
-      msg.pose.pose.orientation.y, msg.pose.pose.orientation.z).normalized();
-
-    const Eigen::Vector3d v_raw(
+      msg.pose.pose.orientation.y, msg.pose.pose.orientation.z);
+    s.twist_linear = Eigen::Vector3d(
       msg.twist.twist.linear.x, msg.twist.twist.linear.y, msg.twist.twist.linear.z);
-    s.velocity = twist_in_body_frame_ ? (s.orientation * v_raw) : v_raw;
-
-    // Angular rate deliberately NOT taken from here. This message's twist is
-    // differentiated from the pose, and that differentiation is blind to the
-    // quaternion double cover -- see onImu() and body_rate_source.hpp.
-
-    std::lock_guard<std::mutex> lock(state_mutex_);
-    state_.position = s.position;
-    state_.orientation = s.orientation;
-    state_.velocity = s.velocity;
-    last_odom_s_ = nowSeconds();
-    have_state_ = true;
+    s.twist_angular = Eigen::Vector3d(
+      msg.twist.twist.angular.x, msg.twist.twist.angular.y, msg.twist.twist.angular.z);
+    return s;
   }
 
-  /// Body angular rate, from the gyro. Everything about why is in
-  /// body_rate_source.hpp; the short version is that a gyro measures rate
-  /// while a differentiated attitude can jump without the attitude moving.
+  /// The exact physics state. Its twist.angular is the engine's own body
+  /// angular velocity -- NOT /drone/truth's, which is differentiated from the
+  /// pose and blind to the quaternion double cover (body_rate_source.hpp).
+  void onTruth(const nav_msgs::msg::Odometry & msg)
+  {
+    const OdomSample s = unpack(msg);
+    const double now = nowSeconds();
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    const std::size_t before = mux_->rejectedRates();
+    mux_->onTruth(s, now);
+    warnIfRejected(before, s.twist_angular);
+  }
+
+  /// The estimate. Its twist.angular is not read: body_rate=est means the
+  /// gyro, gated and filtered here, as it always has.
+  void onEst(const nav_msgs::msg::Odometry & msg)
+  {
+    const OdomSample s = unpack(msg);
+    const double now = nowSeconds();
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    mux_->onEst(s, now);
+  }
+
+  /// Body angular rate, from the gyro, for body_rate=est. Everything about why
+  /// is in body_rate_source.hpp; the short version is that a gyro measures
+  /// rate while a differentiated attitude can jump without the attitude moving.
   void onImu(const sensor_msgs::msg::Imu & msg)
   {
     const Eigen::Vector3d measured(
       msg.angular_velocity.x, msg.angular_velocity.y, msg.angular_velocity.z);
-
     const double now = nowSeconds();
     std::lock_guard<std::mutex> lock(state_mutex_);
-    const double dt = have_imu_ ? (now - last_imu_s_) : 0.0;
-    const std::size_t before = rate_source_->rejected();
-    state_.angular_rate = rate_source_->update(measured, dt);
-    if (rate_source_->rejected() != before) {
-      RCLCPP_WARN_THROTTLE(
-        get_logger(), steady_, 2000,
-        "discarded an implausible body rate of %.1f rad/s (limit %.0f); "
-        "%zu rejected so far -- the state source is malfunctioning",
-        measured.norm(), rate_source_->maxRate(), rate_source_->rejected());
-    }
-    last_imu_s_ = now;
-    have_imu_ = true;
+    const std::size_t before = mux_->rejectedRates();
+    mux_->onGyro(measured, now);
+    warnIfRejected(before, measured);
+  }
+
+  /// Caller holds state_mutex_.
+  void warnIfRejected(std::size_t before, const Eigen::Vector3d & offered)
+  {
+    if (mux_->rejectedRates() == before) {return;}
+    RCLCPP_WARN_THROTTLE(
+      get_logger(), steady_, 2000,
+      "discarded an implausible body rate of %.1f rad/s (limit %.0f); "
+      "%zu rejected so far -- the state source is malfunctioning",
+      offered.norm(), mux_->maxRate(), mux_->rejectedRates());
   }
 
   double nowSeconds() const
@@ -280,20 +342,6 @@ private:
 
   void step()
   {
-    State state;
-    bool have_state;
-    bool have_rate;
-    double last_odom;
-    double last_imu;
-    {
-      std::lock_guard<std::mutex> lock(state_mutex_);
-      state = state_;
-      have_state = have_state_;
-      have_rate = have_imu_ && rate_source_->valid();
-      last_odom = last_odom_s_;
-      last_imu = last_imu_s_;
-    }
-
     const double now = nowSeconds();
 
     // A reset sends simulated time back to zero, which leaves a trajectory
@@ -312,23 +360,29 @@ private:
       controller_->resetIntegral();
       have_step_ = false;
       std::lock_guard<std::mutex> lock(state_mutex_);
-      last_odom_s_ = now;
-      last_imu_s_ = now;
       // The state in hand is from the OLD run. With the plan gone the next
       // step latches a position hold on whatever state it has, and if no
       // post-reset odometry has arrived yet that is where the vehicle was
       // before the reset -- measured: nine metres away, a 40 degree tilt
       // commanded from the pad for as long as it took the planner to
       // republish, and two collisions before the plan had even started.
-      // Forgetting the state idles the motors until a fresh one arrives.
-      have_state_ = false;
-      have_state = false;
+      // Forgetting the state idles the motors until a fresh one arrives --
+      // from every selected source, not just the first to speak.
+      mux_->reset(now);
+    }
+
+    State state;
+    StateMux::Health health;
+    {
+      std::lock_guard<std::mutex> lock(state_mutex_);
+      health = mux_->health(now, odom_timeout_s_, imu_timeout_s_);
+      state = mux_->state();
     }
 
     // No rate feedback means no rotational loop. Commanding anyway would fly
     // on a fabricated zero rate, which looks fine at hover and diverges the
     // moment the vehicle is disturbed.
-    if (!armed_ || !have_state || !have_rate) {
+    if (!armed_ || health.status == StateMux::Status::Waiting) {
       // Same reasoning as a reset: a disarmed vehicle is not being pushed by
       // anything the loop should remember, and the gap while it is disarmed is
       // not time the integrator may accumulate over.
@@ -337,17 +391,11 @@ private:
       publishIdle();
       return;
     }
-    if ((now - last_odom) > odom_timeout_s_) {
+    if (health.status == StateMux::Status::Stale) {
+      // Any selected source going quiet cuts the motors, and the warning
+      // names it: with mixed sources, "no state" alone would not say which.
       RCLCPP_WARN_THROTTLE(
-        get_logger(), steady_, 2000,
-        "no state for %.2f s — cutting motors", now - last_odom);
-      publishIdle();
-      return;
-    }
-    if ((now - last_imu) > imu_timeout_s_) {
-      RCLCPP_WARN_THROTTLE(
-        get_logger(), steady_, 2000,
-        "no gyro for %.2f s — cutting motors", now - last_imu);
+        get_logger(), steady_, 2000, "%s — cutting motors", health.why.c_str());
       publishIdle();
       return;
     }
@@ -498,6 +546,11 @@ private:
     m.integral_force_n = toVec3(dbg.integral_force);
     m.integral_held = dbg.integral_held;
 
+    m.source_position = source_names_[0];
+    m.source_velocity = source_names_[1];
+    m.source_attitude = source_names_[2];
+    m.source_body_rate = source_names_[3];
+
     debug_pub_->publish(m);
   }
 
@@ -509,7 +562,8 @@ private:
 
   std::unique_ptr<SE3Controller> controller_;
   std::unique_ptr<Mixer> mixer_;
-  std::unique_ptr<BodyRateSource> rate_source_;
+  std::unique_ptr<StateMux> mux_;
+  std::string source_names_[4];
   dsim_time::SimEpoch epoch_;
   // Throttling on the SIMULATED clock goes permanently mute after a reset:
   // rcutils compares `now >= last_logged + period`, and a clock that jumped
@@ -520,11 +574,6 @@ private:
   TrajectoryBuffer buffer_;
 
   mutable std::mutex state_mutex_;
-  State state_;
-  bool have_state_ {false};
-  bool have_imu_ {false};
-  double last_odom_s_ {0.0};
-  double last_imu_s_ {0.0};
 
   bool armed_ {true};
   bool have_step_ {false};
@@ -533,7 +582,6 @@ private:
   /// jitter: 250 Hz is a 4 ms step, so 50 ms is twelve missed steps.
   double max_step_dt_s_ {0.05};
   bool start_armed_ {true};
-  bool twist_in_body_frame_ {true};
   double control_rate_hz_ {250.0};
   double odom_timeout_s_ {0.5};
   double imu_timeout_s_ {0.5};
@@ -547,7 +595,8 @@ private:
   Eigen::Vector3d hold_position_ {Eigen::Vector3d::Zero()};
   double hold_yaw_ {0.0};
 
-  rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_sub_;
+  rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr truth_sub_;
+  rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr est_sub_;
   rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr imu_sub_;
   rclcpp::Subscription<dsim_msgs::msg::Trajectory>::SharedPtr traj_sub_;
   rclcpp::Publisher<actuator_msgs::msg::Actuators>::SharedPtr cmd_pub_;

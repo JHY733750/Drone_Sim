@@ -3,6 +3,7 @@
     ros2 launch dsim_bringup sim.launch.py
     ros2 launch dsim_bringup sim.launch.py world:=empty reference:=lemniscate
     ros2 launch dsim_bringup sim.launch.py state:=truth gui:=false
+    ros2 launch dsim_bringup sim.launch.py src_attitude:=truth src_body_rate:=truth
     ros2 launch dsim_bringup sim.launch.py world:=fence3d plan:=/ws/plans/fence3d_seed.json
 
 Vehicle parameters are read from ONE file (config/drone.yaml) and handed to
@@ -13,7 +14,7 @@ import json
 import os
 
 import yaml
-from ament_index_python.packages import get_package_share_directory
+from ament_index_python.packages import get_package_prefix, get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import (DeclareLaunchArgument, ExecuteProcess,
                             IncludeLaunchDescription, OpaqueFunction,
@@ -121,6 +122,33 @@ def _estimator_params(raw_cfg, vehicle):
     return out
 
 
+# The state the controller flies on, field by field. Each name is what the
+# launch accepts; what is actually WIRED is the controller's call
+# (StateSources::fromNames in dsim_control/state_mux.hpp), and it refuses
+# position=slam at startup until /slam/odom is connected.
+STATE_FIELDS = ('position', 'velocity', 'attitude', 'body_rate')
+SOURCE_NAMES = {'position': ('est', 'truth', 'slam'),
+                'velocity': ('est', 'truth'),
+                'attitude': ('est', 'truth'),
+                'body_rate': ('est', 'truth')}
+
+
+def resolve_sources(state, overrides):
+    """state:=est|truth sets all four fields; a non-empty src_<field> overrides
+    that one. Returns {field: source}. Refuses an unknown name here, before
+    Gazebo starts, rather than letting a typo reach the controller."""
+    if state not in ('est', 'truth'):
+        raise RuntimeError(f"state:={state} is not one of est | truth")
+    out = {}
+    for field in STATE_FIELDS:
+        value = overrides.get(field) or state
+        if value not in SOURCE_NAMES[field]:
+            raise RuntimeError(
+                f"src_{field}:={value} is not one of {' | '.join(SOURCE_NAMES[field])}")
+        out[field] = value
+    return out
+
+
 def launch_setup(context, *args, **kwargs):
     world = LaunchConfiguration('world').perform(context)
     gui = LaunchConfiguration('gui').perform(context)
@@ -158,18 +186,21 @@ def launch_setup(context, *args, **kwargs):
     sensors = LaunchConfiguration('sensors').perform(context)
     noise_seed = LaunchConfiguration('noise_seed').perform(context)
     state = LaunchConfiguration('state').perform(context)
-    if state not in ('est', 'truth'):
-        raise RuntimeError(f"state:={state} is not one of est | truth")
-    if state == 'est' and sensors != 'true':
+    sources = resolve_sources(state, {
+        f: LaunchConfiguration(f'src_{f}').perform(context) for f in STATE_FIELDS})
+    on_est = [f for f in STATE_FIELDS if sources[f] == 'est']
+    if on_est and sensors != 'true':
         # Refuse rather than fall back. With no sensors there is no estimate,
         # and a controller whose state source never publishes sits on the
         # ground holding position with its motors cut -- which looks like a
         # quiet, healthy sim right up until someone asks why it never took
         # off. Say so at launch instead.
         raise RuntimeError(
-            'state:=est needs sensors:=true -- the estimator has nothing to '
-            'estimate from. Either enable the sensors or fly on ground truth '
-            'explicitly with state:=truth.')
+            f"{', '.join(on_est)} on est needs sensors:=true -- the estimator "
+            f"has nothing to estimate from. Either enable the sensors or fly "
+            f"those fields on ground truth (state:=truth, or src_<field>:=truth).")
+    print('[sim.launch] state sources: ' +
+          ' '.join(f'{f}={sources[f]}' for f in STATE_FIELDS))
 
     # ---- a planner's trajectory ------------------------------------------
     # plan:= names a file of space-time control points (see plans/). The plan
@@ -234,6 +265,10 @@ def launch_setup(context, *args, **kwargs):
             '/drone/command/motor_speed@actuator_msgs/msg/Actuators]gz.msgs.Actuators',
             f'{contact_topic}@ros_gz_interfaces/msg/Contacts[gz.msgs.Contacts',
             '/drone/imu@sensor_msgs/msg/Imu[gz.msgs.IMU',
+            # The exact physics state from the dsim_truth plugin in model.sdf:
+            # pose and velocities read from the engine every step, nothing
+            # differentiated. What the controller's truth sources read.
+            '/drone/truth_exact@nav_msgs/msg/Odometry[gz.msgs.Odometry',
         ],
         remappings=[
             ('/model/drone/odometry_truth', '/drone/truth'),
@@ -262,16 +297,17 @@ def launch_setup(context, *args, **kwargs):
         'state.max_body_rate_rad_s': float(gains['state']['max_body_rate_rad_s']),
         'state.gyro_lowpass_tau_s': float(gains['state']['gyro_lowpass_tau_s']),
     })
-    # state:=est points the controller's state subscription at the estimator.
-    # A remap on THIS node only: the referee, the sensors and the viewer keep
-    # reading /drone/truth, because they measure the vehicle rather than fly
-    # it, and the estimator itself reads truth for position. Nothing in
-    # dsim_control knows which it is getting -- that is what makes the two
-    # runs comparable.
+    controller_params.update({f'state.source.{f}': sources[f] for f in STATE_FIELDS})
+    # The controller takes each field from its own source: est from
+    # /drone/state_est (and the /drone/imu gyro for body rate), truth from
+    # /drone/truth_exact. Only the controller changes: the referee, the
+    # sensors and the viewer keep reading /drone/truth, because they measure
+    # the vehicle rather than fly it, and the estimator itself reads truth for
+    # position. The controller logs the four sources at startup and stamps
+    # them on every /drone/control_debug message.
     controller = Node(
         package='dsim_control', executable='controller_node', name='dsim_controller',
         output='screen', parameters=[controller_params],
-        remappings=[('/drone/truth', '/drone/state_est')] if state == 'est' else [],
     )
 
     # ---- referee ----------------------------------------------------------
@@ -379,9 +415,14 @@ def launch_setup(context, *args, **kwargs):
         target = os.path.join(WEB_DIR, 'current.json')
         try:
             tmp = target + '.tmp'
+            # 'state' is truth only when all four fields are, est only when
+            # all four are, and mixed otherwise -- the viewer's "on truth"
+            # label must not claim a run that flew partly on the estimate.
+            kinds = set(sources.values())
+            summary = kinds.pop() if len(kinds) == 1 else 'mixed'
             with open(tmp, 'w') as fh:
                 json.dump({'world': world, 'reference': reference,
-                           'state': state,
+                           'state': summary, 'sources': sources,
                            'plan': os.path.basename(plan) if plan else None}, fh)
             os.replace(tmp, target)
         except OSError as exc:
@@ -400,12 +441,12 @@ def launch_setup(context, *args, **kwargs):
         nodes.append(Node(
             package='dsim_eval', executable='viz_relay_node', name='dsim_viz_relay',
             output='screen',
-            # state_topic is the Odometry the controller was remapped to, so
-            # /drone/viz/state is what it consumed and check_telemetry.py can
-            # hold |velocity_world| == |twist| against the right source.
+            # state_topic is the Odometry the controller took its VELOCITY
+            # from, so check_telemetry.py can hold |velocity_world| == |twist|
+            # against the right source even when the fields are mixed.
             parameters=[{'use_sim_time': True, 'rate_hz': 30.0,
-                         'state_topic': '/drone/state_est' if state == 'est'
-                         else '/drone/truth'}],
+                         'state_topic': '/drone/state_est' if sources['velocity'] == 'est'
+                         else '/drone/truth_exact'}],
         ))
 
     if use_rviz == 'true':
@@ -463,15 +504,30 @@ def generate_launch_description():
                               'from ground truth with the noise model in '
                               'config/drone.yaml.'),
         DeclareLaunchArgument('state', default_value='est',
-                              description='what the controller flies on: est '
-                              '(the sensor-based estimate on /drone/state_est: '
-                              'attitude from gyro + accel + mag, velocity from '
-                              'accel + optical flow + rangefinder, position '
-                              'still ground truth) or truth (/drone/truth, '
-                              'perfect state). est is the default and needs '
-                              'sensors:=true; the launch refuses est without '
-                              'them. Only the controller is remapped -- the '
-                              'referee, sensors and viewer always see truth.'),
+                              description='what the controller flies on, all '
+                              'four fields at once: est (the sensor-based '
+                              'estimate on /drone/state_est: attitude from gyro '
+                              '+ accel + mag, velocity from accel + optical '
+                              'flow + rangefinder, position still ground truth; '
+                              'body rate from the /drone/imu gyro) or truth '
+                              '(/drone/truth_exact, the physics engine\'s exact '
+                              'state). src_<field> overrides one field. Any '
+                              'field on est needs sensors:=true; the launch '
+                              'refuses otherwise. Only the controller changes '
+                              '-- the referee, sensors and viewer always see '
+                              'truth.'),
+        DeclareLaunchArgument('src_position', default_value='',
+                              description='est | truth | slam; empty follows '
+                              'state:=. slam is reserved: the controller '
+                              'refuses it at startup until /slam/odom is wired.'),
+        DeclareLaunchArgument('src_velocity', default_value='',
+                              description='est | truth; empty follows state:='),
+        DeclareLaunchArgument('src_attitude', default_value='',
+                              description='est | truth; empty follows state:='),
+        DeclareLaunchArgument('src_body_rate', default_value='',
+                              description='est (the gyro, gated and low-passed '
+                              'per gains.yaml) | truth (the engine\'s angular '
+                              'velocity, gated only); empty follows state:='),
         DeclareLaunchArgument('noise_seed', default_value='1',
                               description='RNG seed for the sensor noise. '
                               'Fixed by default, which gives a repeatable '
@@ -499,5 +555,12 @@ def generate_launch_description():
         SetEnvironmentVariable('GZ_SIM_RESOURCE_PATH',
                                f'{model_path}:{WORLD_DIR}:' +
                                os.environ.get('GZ_SIM_RESOURCE_PATH', '')),
+        # Where Gazebo finds the dsim_truth system plugin that model.sdf loads.
+        # Without it the plugin fails to load (gz logs an error and carries
+        # on), /drone/truth_exact never publishes, and every truth source
+        # leaves the controller idling with "no truth state".
+        SetEnvironmentVariable('GZ_SIM_SYSTEM_PLUGIN_PATH',
+                               os.path.join(get_package_prefix('dsim_truth'), 'lib') +
+                               ':' + os.environ.get('GZ_SIM_SYSTEM_PLUGIN_PATH', '')),
         OpaqueFunction(function=launch_setup),
     ])

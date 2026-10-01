@@ -92,8 +92,8 @@ def main(url):
     # 2. Same vector, two frames. A rotation cannot change a length, so the
     #    world-frame velocity the controller resolved must match the magnitude
     #    of the body-frame twist it was GIVEN -- state_vel, the Odometry the
-    #    controller subscribes to, which is /drone/state_est by default and
-    #    /drone/truth under state:=truth. Comparing against truth instead would
+    #    controller took its velocity from, which is /drone/state_est by
+    #    default and /drone/truth_exact with the velocity on truth. Comparing against truth instead would
     #    fail by exactly the estimation error (26 mm/s on an 18 degree lap,
     #    against a 4 mm/s tolerance): a measurement of the estimator, not an
     #    identity about the controller.

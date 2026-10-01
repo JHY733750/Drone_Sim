@@ -6,10 +6,13 @@
 #include <cmath>
 #include <cmath>
 #include <limits>
+#include <stdexcept>
+#include <string>
 #include "dsim_control/body_rate_source.hpp"
 #include "dsim_control/mixer.hpp"
 #include "dsim_control/se3_controller.hpp"
 #include "dsim_control/angles.hpp"
+#include "dsim_control/state_mux.hpp"
 
 using namespace dsim_control;
 
@@ -800,4 +803,285 @@ TEST(SE3Controller, TheShippedIntegralGainsAreInsideTheStabilityBound)
     // itself assumes a point mass with no actuator lag.
     EXPECT_LT(g.ki(i), 0.5 * bound);
   }
+}
+
+// ---------------------------------------------------------------------------
+// State sources: each of position, velocity, attitude and body rate is taken
+// from the estimate or from ground truth independently. The user's rule is
+// "truth means truth": a field on truth is the truth input, unprocessed, even
+// while every sensor is noisy; a field on est is the estimate; and choosing
+// one never leaks into another.
+// ---------------------------------------------------------------------------
+namespace
+{
+constexpr double kMaxRate = 30.0;
+constexpr double kGyroTau = 0.05;   // the est path's low-pass, ON, so a test
+                                    // can tell whether truth went through it
+
+Eigen::Quaterniond ypr(double yaw, double pitch, double roll)
+{
+  return Eigen::Quaterniond(
+    Eigen::AngleAxisd(yaw, Eigen::Vector3d::UnitZ()) *
+    Eigen::AngleAxisd(pitch, Eigen::Vector3d::UnitY()) *
+    Eigen::AngleAxisd(roll, Eigen::Vector3d::UnitX()));
+}
+
+/// A truth sample and an estimate of it with every field visibly wrong --
+/// noise "injected" large enough that no field of one could pass for the
+/// other. Attitudes differ by 35 deg of yaw, so a velocity rotated with the
+/// wrong attitude is off by metres per second, not by rounding.
+OdomSample truthSample()
+{
+  OdomSample t;
+  t.position = Eigen::Vector3d(1.25, -0.5, 1.5);
+  t.orientation = ypr(0.7, 0.12, -0.08);
+  t.twist_linear = Eigen::Vector3d(1.8, 0.3, -0.1);    // body frame
+  t.twist_angular = Eigen::Vector3d(0.2, -0.1, 1.8);   // body frame
+  return t;
+}
+
+OdomSample estSample()
+{
+  OdomSample e;
+  e.position = Eigen::Vector3d(1.31, -0.46, 1.43);
+  e.orientation = ypr(0.7 + 0.61, 0.10, -0.05);
+  e.twist_linear = Eigen::Vector3d(1.7, 0.42, -0.02);
+  e.twist_angular = Eigen::Vector3d(9.0, 9.0, 9.0);    // never read
+  return e;
+}
+
+const Eigen::Vector3d kGyro(0.23, -0.14, 1.77);   // what the noisy gyro says
+
+StateSources pick(Source p, Source v, Source a, Source r)
+{
+  StateSources s;
+  s.position = p;
+  s.velocity = v;
+  s.attitude = a;
+  s.body_rate = r;
+  return s;
+}
+
+/// Feed one of everything, as the node would, and return the mux.
+StateMux fed(const StateSources & s, const OdomSample & truth, const OdomSample & est)
+{
+  StateMux m(s, true, kMaxRate, kGyroTau);
+  m.onGyro(kGyro, 0.0);
+  m.onTruth(truth, 0.0);
+  m.onEst(est, 0.0);
+  return m;
+}
+
+double quatDistance(const Eigen::Quaterniond & a, const Eigen::Quaterniond & b)
+{
+  return std::min((a.coeffs() - b.coeffs()).norm(), (a.coeffs() + b.coeffs()).norm());
+}
+}  // namespace
+
+// FAILS IF: any truth field is processed on its way through -- filtered,
+// gated into a held value, rotated with the wrong attitude, or simply taken
+// from the estimate. Every sensor here is wrong (estSample, kGyro) and the
+// gyro low-pass is ON; with all four on truth the output must still be the
+// truth input to rounding. The body rate is fed twice with a step between, so
+// a truth rate passed through the 50 ms low-pass would land 7% of the way to
+// the second value instead of on it.
+TEST(StateMux, AllTruthIsTheTruthInputExactlyWhileTheSensorsAreNoisy)
+{
+  const auto all = pick(Source::Truth, Source::Truth, Source::Truth, Source::Truth);
+  const OdomSample t = truthSample();
+  StateMux m = fed(all, t, estSample());
+  OdomSample t2 = t;
+  t2.twist_angular = Eigen::Vector3d(-0.4, 0.3, 2.6);
+  m.onTruth(t2, 0.004);
+  ASSERT_EQ(m.health(0.004, 0.5, 0.5).status, StateMux::Status::Ready);
+
+  const State s = m.state();
+  EXPECT_LT((s.position - t.position).norm(), 1e-12);
+  EXPECT_LT(quatDistance(s.orientation, t.orientation), 1e-12);
+  EXPECT_LT((s.velocity - t.orientation * t.twist_linear).norm(), 1e-12);
+  EXPECT_LT((s.angular_rate - t2.twist_angular).norm(), 1e-12);
+}
+
+// FAILS IF: an est field is quietly served from truth (which would make every
+// "est vs truth" comparison compare truth with itself), or the est body rate
+// stops being the gyro through its configured low-pass.
+TEST(StateMux, AllEstIsTheEstimateAndNotTheTruth)
+{
+  const auto all = pick(Source::Est, Source::Est, Source::Est, Source::Est);
+  const OdomSample t = truthSample(), e = estSample();
+  StateMux m = fed(all, t, e);
+  ASSERT_EQ(m.health(0.0, 0.5, 0.5).status, StateMux::Status::Ready);
+
+  const State s = m.state();
+  EXPECT_LT((s.position - e.position).norm(), 1e-12);
+  EXPECT_LT(quatDistance(s.orientation, e.orientation), 1e-12);
+  EXPECT_LT((s.velocity - e.orientation * e.twist_linear).norm(), 1e-12);
+  EXPECT_LT((s.angular_rate - kGyro).norm(), 1e-12);   // first sample adopted
+
+  EXPECT_GT((s.position - t.position).norm(), 0.05);
+  EXPECT_GT((s.velocity - t.orientation * t.twist_linear).norm(), 0.1);
+  EXPECT_GT(quatDistance(s.orientation, t.orientation), 0.1);
+
+  // Second gyro sample 4 ms later: the est path is low-passed (tau 50 ms), so
+  // it moves 7.4% of the way, not all of it.
+  const Eigen::Vector3d g2 = kGyro + Eigen::Vector3d(0.0, 0.0, 1.0);
+  m.onGyro(g2, 0.004);
+  EXPECT_NEAR(m.state().angular_rate.z(), kGyro.z() + 0.004 / (kGyroTau + 0.004), 1e-12);
+}
+
+// FAILS IF: one field's choice leaks into another, in any of the 16
+// combinations. The classic leak is the velocity: both Odometry messages carry
+// it in their OWN body frame, so attitude=truth + velocity=est must rotate the
+// estimate's body velocity with the ESTIMATED attitude (giving the estimator's
+// world velocity), not with the true one -- that would be 35 deg off here,
+// about 1.1 m/s, and a velocity that is neither the estimate nor the truth.
+TEST(StateMux, EachFieldComesFromItsOwnSourceInEveryCombination)
+{
+  const OdomSample t = truthSample(), e = estSample();
+  const Source both[2] = {Source::Est, Source::Truth};
+  for (Source p : both) {
+    for (Source v : both) {
+      for (Source a : both) {
+        for (Source r : both) {
+          const auto sel = pick(p, v, a, r);
+          StateMux m = fed(sel, t, e);
+          ASSERT_EQ(m.health(0.0, 0.5, 0.5).status, StateMux::Status::Ready) << sel.describe();
+          const State s = m.state();
+          const OdomSample & ps = p == Source::Truth ? t : e;
+          const OdomSample & vs = v == Source::Truth ? t : e;
+          const OdomSample & as = a == Source::Truth ? t : e;
+          const Eigen::Vector3d rate = r == Source::Truth ? t.twist_angular : kGyro;
+          EXPECT_LT((s.position - ps.position).norm(), 1e-12) << sel.describe();
+          EXPECT_LT((s.velocity - vs.orientation * vs.twist_linear).norm(), 1e-12)
+            << sel.describe();
+          EXPECT_LT(quatDistance(s.orientation, as.orientation), 1e-12) << sel.describe();
+          EXPECT_LT((s.angular_rate - rate).norm(), 1e-12) << sel.describe();
+        }
+      }
+    }
+  }
+  // And the leak above is not a rounding-sized distinction: the two candidate
+  // world velocities for attitude=truth + velocity=est really differ.
+  EXPECT_GT((e.orientation * e.twist_linear - t.orientation * e.twist_linear).norm(), 0.5);
+}
+
+// FAILS IF: the truth body rate is derived from the pose. Gazebo's
+// OdometryPublisher did exactly that and reported 626 rad/s once per
+// revolution when the quaternion changed sheet. Here the vehicle yaws steadily
+// at 1.8 rad/s through yaw = pi, and the published quaternion is negated half
+// way -- the same rotation, a different sign. The rate handed to the loop must
+// be the sample's own angular velocity at every step: no spike, no hold.
+TEST(StateMux, TruthBodyRateIsUntouchedAcrossAQuaternionSignFlip)
+{
+  const auto sel = pick(Source::Truth, Source::Truth, Source::Truth, Source::Truth);
+  StateMux m(sel, true, kMaxRate, kGyroTau);
+  const double dt = 0.004, rate = 1.8;
+  double worst = 0.0;
+  for (int k = 0; k < 40; ++k) {
+    OdomSample s = truthSample();
+    const double yaw = M_PI - 20 * dt * rate + k * dt * rate;
+    s.orientation = ypr(yaw, 0.0, 0.0);
+    if (k >= 20) {s.orientation.coeffs() = -s.orientation.coeffs();}
+    s.twist_angular = Eigen::Vector3d(0.0, 0.0, rate);
+    m.onTruth(s, k * dt);
+    worst = std::max(worst, (m.state().angular_rate - s.twist_angular).norm());
+  }
+  EXPECT_EQ(worst, 0.0);
+  EXPECT_EQ(m.rejectedRates(), 0u);
+}
+
+// FAILS IF: the gyro can reach the loop while body_rate=truth. A noisy gyro
+// sample arriving after the truth sample must not overwrite it.
+TEST(StateMux, TheGyroIsIgnoredWhenBodyRateIsTruth)
+{
+  const auto sel = pick(Source::Est, Source::Est, Source::Est, Source::Truth);
+  const OdomSample t = truthSample();
+  StateMux m = fed(sel, t, estSample());
+  m.onGyro(Eigen::Vector3d(5.0, -5.0, 5.0), 0.002);
+  EXPECT_LT((m.state().angular_rate - t.twist_angular).norm(), 1e-12);
+}
+
+// FAILS IF: position=slam is accepted (nothing feeds it, so the vehicle would
+// fly on whatever the fallback was), or the refusal does not say why, or the
+// vocabulary check lets a typo through as a silent default.
+TEST(StateSources, SlamIsAcceptedAsANameAndRefusedUntilWired)
+{
+  try {
+    StateSources::fromNames("slam", "est", "est", "est");
+    FAIL() << "position=slam was accepted";
+  } catch (const std::invalid_argument & e) {
+    EXPECT_NE(std::string(e.what()).find("not wired"), std::string::npos) << e.what();
+  }
+  // slam is only ever a position source.
+  EXPECT_THROW(StateSources::fromNames("est", "slam", "est", "est"), std::invalid_argument);
+  EXPECT_THROW(StateSources::fromNames("est", "est", "est", "slam"), std::invalid_argument);
+  // Typos are refused, not defaulted.
+  EXPECT_THROW(StateSources::fromNames("truht", "est", "est", "est"), std::invalid_argument);
+  EXPECT_THROW(StateSources::fromNames("est", "est", "", "est"), std::invalid_argument);
+  // The two wired names parse to what they say, per field.
+  const auto s = StateSources::fromNames("truth", "est", "truth", "est");
+  EXPECT_EQ(s.position, Source::Truth);
+  EXPECT_EQ(s.velocity, Source::Est);
+  EXPECT_EQ(s.attitude, Source::Truth);
+  EXPECT_EQ(s.body_rate, Source::Est);
+  EXPECT_EQ(s.describe(), "position=truth velocity=est attitude=truth body_rate=est");
+}
+
+// FAILS IF: a selected source can go quiet without the loop noticing. With
+// mixed sources there are up to three streams, and each one the selection
+// actually uses must hold the vehicle on the ground when it stops -- while a
+// stream the selection does NOT use must not (an all-truth run has no gyro
+// subscription at all, and must still fly).
+TEST(StateMux, EverySelectedSourceIsWatchedAndNoOtherIs)
+{
+  // velocity on est, the rest on truth: needs truth and the estimate, no gyro.
+  const auto sel = pick(Source::Truth, Source::Est, Source::Truth, Source::Truth);
+  StateMux m(sel, true, kMaxRate, kGyroTau);
+  EXPECT_EQ(m.health(0.0, 0.5, 0.5).status, StateMux::Status::Waiting);
+  m.onTruth(truthSample(), 0.0);
+  EXPECT_EQ(m.health(0.0, 0.5, 0.5).status, StateMux::Status::Waiting)
+    << "flew with no estimate in hand while velocity=est";
+  m.onEst(estSample(), 0.0);
+  EXPECT_EQ(m.health(0.1, 0.5, 0.5).status, StateMux::Status::Ready)
+    << "a gyro that is not selected was required";
+
+  // The estimate stops; truth keeps coming.
+  for (int k = 1; k <= 200; ++k) {m.onTruth(truthSample(), k * 0.004);}
+  const auto h = m.health(0.8, 0.5, 0.5);
+  EXPECT_EQ(h.status, StateMux::Status::Stale);
+  EXPECT_NE(h.why.find("state_est"), std::string::npos) << h.why;
+
+  // And the other way round: truth stops while the estimate keeps coming.
+  StateMux n(sel, true, kMaxRate, kGyroTau);
+  n.onTruth(truthSample(), 0.0);
+  for (int k = 0; k <= 200; ++k) {n.onEst(estSample(), k * 0.004);}
+  const auto h2 = n.health(0.8, 0.5, 0.5);
+  EXPECT_EQ(h2.status, StateMux::Status::Stale);
+  EXPECT_NE(h2.why.find("truth"), std::string::npos) << h2.why;
+
+  // body_rate=est: the gyro is watched with its own timeout.
+  const auto est = pick(Source::Est, Source::Est, Source::Est, Source::Est);
+  StateMux g(est, true, kMaxRate, kGyroTau);
+  g.onGyro(kGyro, 0.0);
+  for (int k = 0; k <= 200; ++k) {g.onEst(estSample(), k * 0.004);}
+  const auto h3 = g.health(0.8, 0.5, 0.5);
+  EXPECT_EQ(h3.status, StateMux::Status::Stale);
+  EXPECT_NE(h3.why.find("gyro"), std::string::npos) << h3.why;
+}
+
+// FAILS IF: a reset forgets only one of the sources. After a reset the state
+// in hand belongs to the old run (nine metres away, measured), so the loop
+// must wait for a fresh sample from EVERY selected source, not just the first
+// that speaks.
+TEST(StateMux, AResetWaitsForEverySelectedSourceAgain)
+{
+  const auto sel = pick(Source::Truth, Source::Est, Source::Truth, Source::Est);
+  StateMux m = fed(sel, truthSample(), estSample());
+  ASSERT_EQ(m.health(0.0, 0.5, 0.5).status, StateMux::Status::Ready);
+  m.reset(0.0);
+  EXPECT_EQ(m.health(0.0, 0.5, 0.5).status, StateMux::Status::Waiting);
+  m.onTruth(truthSample(), 0.004);
+  EXPECT_EQ(m.health(0.004, 0.5, 0.5).status, StateMux::Status::Waiting);
+  m.onEst(estSample(), 0.008);
+  EXPECT_EQ(m.health(0.008, 0.5, 0.5).status, StateMux::Status::Ready);
 }
