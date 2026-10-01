@@ -25,6 +25,15 @@ escape over the top that the 2D problem never had -- and the resulting curve
 is lifted to the scenario's flight altitude afterwards, which is exact
 because the altitude is constant.
 
+The solver works in the PLANNER's coordinates; the sim flies in its own
+(dsim_planner/frames.py: p_sim = s * (p - c), t unchanged). The answer is
+mapped once, by frames.points_to_sim, which is exact for a Bezier, and the
+plan records the frame it is in -- the launch and the bridge refuse a plan
+whose frame is not the scenario's. Every number the user gives or reads is in
+SIM units: --inflate and --v-max are converted to planner units before the
+solve (divided by s), and the certificate is converted back (times s). For
+s = 1 every conversion is the identity.
+
 Nothing here is a ROS node. The plan is a file; dsim_planner's bridge reads it.
 """
 import argparse
@@ -34,6 +43,8 @@ import sys
 import time
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT / "src" / "dsim_planner"))
+from dsim_planner import frames  # noqa: E402
 
 #: Seconds of closed-loop lag: the peak position error a velocity STEP of v0
 #: produces is about this times v0. Fitted from six flown plans between 0.70
@@ -228,14 +239,19 @@ def main(argv=None):
 
     veh = vehicle()
     radius = veh["radius_m"]
-    grow = radius if args.inflate is None else args.inflate
+    grow = radius if args.inflate is None else args.inflate     # SIM metres
     sc, scenario = load_scenario(args.scenario)
     configs = ([(args.N, args.n_seg)] if not args.sweep
                else [(int(a), int(b)) for a, b in sc["configs"]])
 
+    frame = frames.frame_for(args.scenario)
+    scale = frame["scale"]
+    # The solver's own units. A sim length L is L/s planner metres, and at
+    # fixed time a sim speed v is v/s planner metres per second.
+    grow_planner = frames.length_to_planner(grow, frame)
     kw = dict(min_dt=args.min_dt, max_iter=args.max_iter, time_weight=args.time_weight)
     if args.v_max is not None:
-        kw["v_max"] = args.v_max
+        kw["v_max"] = frames.length_to_planner(args.v_max, frame)
 
     print(f"solving {args.scenario} ({sc['spatial_dim']}D+t): "
           f"{len(scenario['obstacles'])} obstacles, "
@@ -244,7 +260,11 @@ def main(argv=None):
           + (f" (the vehicle radius)" if args.inflate is None else "")
           + ("; the certificate below is about the VEHICLE" if grow > 0 else
              "; the certificate below is about a POINT"))
-    out, elapsed = solve(inflate(scenario, grow), configs, **kw)
+    if scale != 1.0:
+        print(f"  frame: {frames.describe(frame)}; the solver sees the obstacles grown by "
+              f"{grow_planner:.3f} planner m"
+              + (f" and a speed cap of {kw['v_max']:.3f} planner m/s" if "v_max" in kw else ""))
+    out, elapsed = solve(inflate(scenario, grow_planner), configs, **kw)
     print(f"  {elapsed:.2f} s for {len(configs)} config(s)")
 
     best = out["best"]
@@ -263,14 +283,19 @@ def main(argv=None):
               + ("   <- best" if key == best else ""))
 
     r = out["results"][best]
-    P = lift_plan(r["control_points"], sc)
+    # Planner coordinates -> sim coordinates, by the one map there is.
+    P = frames.points_to_sim(lift_plan(r["control_points"], sc), frame)
     # What the referee should report, stated BEFORE the run so the run can
     # disagree with it. The optimiser certifies a point against the INFLATED
     # obstacles; the referee measures the real ones and subtracts the vehicle
     # radius. The two agree exactly when grow == radius, and differ by
     # (grow - radius) otherwise.
-    predicted = r["min_clearance"] + grow - radius
-    print(f"\n  certified {r['min_clearance']:+.4f} m against obstacles grown by "
+    # In the sim the referee measures s * (|p - c| - r) - radius against the
+    # real obstacles; the solver certified |p - c| - r - grow_planner >= m in
+    # its own units. So the referee should see s * m + grow - radius.
+    certified_sim = scale * r["min_clearance"]
+    predicted = certified_sim + grow - radius
+    print(f"\n  certified {certified_sim:+.4f} m against obstacles grown by "
           f"{grow:.2f} m; on the REAL obstacles a {radius:.2f} m vehicle has "
           f"{predicted:+.4f} m, which is what the referee should report"
           + ("" if predicted > 0 else
@@ -311,13 +336,21 @@ def main(argv=None):
                          f"-N {r['N']} --n-seg {r['n_seg']}"
                          + (f" --v-max {args.v_max}" if args.v_max is not None else ""),
         "scenario": args.scenario,
+        # Which transform the control points are in. The launch and the bridge
+        # refuse the plan if this is not the scenario's current frame.
+        "frame": frame,
         "spatial_dim": int(sc["spatial_dim"]),
         "solver": r["backend"],
         "config": best,
         # The solver's own verdict, carried so a run can be read against what
         # the optimiser claimed rather than against a memory of it.
-        "certified_clearance_m": r["min_clearance"],
+        # SIM metres, like everything else in this file except solver_units.
+        "certified_clearance_m": certified_sim,
         "inflated_by_m": grow,
+        # What the solver itself was given and returned, in planner units.
+        "solver_units": {"scale": scale, "inflated_by": grow_planner,
+                         "v_max": kw.get("v_max"),
+                         "certified_clearance": r["min_clearance"]},
         # What the referee is expected to measure on the real obstacles with
         # this vehicle. scripts/check_planner.py holds the live run to it.
         "predicted_clearance_m": round(predicted, 6),
@@ -359,7 +392,7 @@ def main(argv=None):
     except ValueError:
         shown = out_path
     print(f"\nwrote {shown}")
-    print(f"  make plan PLAN={out_path.relative_to(ROOT)}")
+    print(f"  make plan PLAN={shown}")
     return 0
 
 

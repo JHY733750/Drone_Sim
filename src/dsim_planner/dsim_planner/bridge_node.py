@@ -26,7 +26,15 @@ new plan over the running one -- scripts/solve_plan.py, or the viewer's solve
 panel -- takes effect without relaunching the simulator. A file that does not
 parse, or whose control points are not a trajectory, is REFUSED and the old
 plan keeps flying: a half-written file must not be able to disarm a vehicle in
-the air. (solve_plan.py writes aside and renames, so that should never be the
+the air.
+
+A plan is also refused if it is not in its scenario's FRAME (see frames.py):
+the sim places each scenario with a similarity transform, a plan records the
+transform its control points are in, and one in any other frame -- including
+every plan written before frames.py, which is in the planner's coordinates --
+would fly beside its obstacles rather than between them. `scenario` (set by
+the launch) names the scenario the world was built for; empty means "the one
+the plan names", which still refuses a plan in a stale or missing frame. (solve_plan.py writes aside and renames, so that should never be the
 reason, but "should" is not a mechanism.)
 
 Nothing here reads /clock: with use_sim_time an rclpy node ingests the 1 kHz
@@ -47,14 +55,20 @@ from rclpy.qos import DurabilityPolicy, QoSProfile
 
 from dsim_msgs.msg import FlightStatus, Trajectory, TrajectorySetpoint
 
-from . import spacetime
+from . import frames, spacetime
 
 
-def load_plan(path):
+def load_plan(path, scenario=""):
+    """Read a plan file; raise if it has no control points or if it is not in
+    `scenario`'s frame (default: the scenario the plan itself names)."""
     with open(path) as fh:
         plan = json.load(fh)
     if "control_points" not in plan:
         raise spacetime.PlanError(f"{path}: no 'control_points'")
+    try:
+        frames.check_plan_frame(plan, scenario or str(plan.get("scenario")))
+    except frames.FrameError as exc:
+        raise spacetime.PlanError(f"{path}: {exc}") from None
     return plan
 
 
@@ -90,6 +104,7 @@ class BridgeNode(Node):
         sample_dt = float(self.declare_parameter("sample_dt_s", 0.02).value)
         yaw = float(self.declare_parameter("yaw_rad", 0.0).value)
         period = float(self.declare_parameter("republish_period_s", 1.0).value)
+        self.scenario = str(self.declare_parameter("scenario", "").value)
         if not plan_file:
             raise RuntimeError("plan_file is required; there is no default plan to fly")
 
@@ -128,7 +143,7 @@ class BridgeNode(Node):
         if mtime == self.mtime:
             return False
         try:
-            plan = load_plan(self.plan_file)
+            plan = load_plan(self.plan_file, self.scenario)
             msg, samples = build_trajectory(
                 plan["control_points"], self.start_s, self.sample_dt, self.yaw)
         except (spacetime.PlanError, OSError, KeyError, TypeError,

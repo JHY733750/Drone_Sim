@@ -194,6 +194,18 @@ def launch_setup(context, *args, **kwargs):
             raise RuntimeError(
                 f'plan {plan} solves scenario {scenario_name!r}; launch it with '
                 f'world:={scenario_name}, not world:={world}')
+        # And in the frame the world was generated in. The sim places each
+        # scenario with a similarity transform (dsim_planner/frames.py); a
+        # plan records the one its control points are in, and a plan in any
+        # other -- every plan from before frames.py is in the planner's own
+        # coordinates -- would fly beside its obstacles, not between them.
+        # The bridge checks again on every reload; this makes a bad plan:=
+        # fail the launch instead of a node.
+        from dsim_planner import frames
+        try:
+            frames.check_plan_frame(plan_doc, scenario_name)
+        except frames.FrameError as exc:
+            raise RuntimeError(f'plan {plan} refused: {exc}') from None
         if reference != 'none':
             # Two publishers on /drone/trajectory would take turns owning the
             # vehicle. The plan wins; say so rather than silently dropping one.
@@ -337,6 +349,7 @@ def launch_setup(context, *args, **kwargs):
             output='screen',
             parameters=[{'use_sim_time': False,
                          'plan_file': plan,
+                         'scenario': scenario_name,
                          'start_s': float(scenario['sim']['start_s'])}],
         ))
 

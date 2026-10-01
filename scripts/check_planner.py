@@ -41,6 +41,10 @@ import math
 import sys
 import time
 import urllib.request
+import pathlib
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent / "src" / "dsim_planner"))
+from dsim_planner import frames  # noqa: E402  (the one map between planner and sim)
 
 #: The referee (C++ de Casteljau) against the planner (Python, via numpy).
 #: Two implementations of the same curve: they should agree to floating point,
@@ -120,7 +124,7 @@ class Checks:
         self.failures += 1
 
 
-def obstacle_agreement(url, scenario, samples=41):
+def obstacle_agreement(url, scenario, frame, samples=41):
     """Compare the referee's live obstacle field against the planner's own.
 
     The referee is polled at whatever scenario time it happens to be at, and
@@ -128,6 +132,16 @@ def obstacle_agreement(url, scenario, samples=41):
     the same lifted-control-point motion -- is evaluated at that same instant.
     Repeated across the window so a disagreement that only appears mid-curve
     (a cubic read as a straight line, say) cannot hide.
+
+    In ONE frame, the sim's, and not by giving both sides the same mapped
+    input. The planner is evaluated on the planner's own control points
+    (`scenario` is scenarios/<name>.json, verbatim) and its ANSWER is mapped
+    by frames.to_sim; the referee was handed control points mapped by
+    gen_assets.py and evaluates those. The two agree only if the map is the
+    same affine map on both sides -- map-then-evaluate equals
+    evaluate-then-map for a Bezier exactly when it is -- so a referee yaml left
+    in the planner's frame, a wrong centre, or a radius-only scale fails here
+    rather than being compared against itself.
 
     Returns (worst distance, which obstacle, at what time, window mismatches).
     """
@@ -166,6 +180,11 @@ def obstacle_agreement(url, scenario, samples=41):
             if not active:
                 continue
             want = obstacle_positions_at(cps, np.array([t]))[0]
+            # Into the sim frame. A 2D obstacle's z is the flight altitude and
+            # is not compared, but the map needs three coordinates.
+            want3 = [float(want[0]), float(want[1]),
+                     float(want[2]) if spatial == 3 else float(ref["control_points"][0][2])]
+            want = np.asarray(frames.to_sim(want3, frame)[:spatial])
             got = o["pos"][:spatial]
             d = float(np.linalg.norm(np.asarray(got) - want))
             if d > worst:
@@ -174,7 +193,7 @@ def obstacle_agreement(url, scenario, samples=41):
     return (worst if seen else None), worst_name, worst_t, window
 
 
-def los_agreement(samples, scenario):
+def los_agreement(samples, scenario, frame):
     """Compare the referee's sight-line margins against the planner's own.
 
     The same shape of test as obstacle_agreement, and for a stronger reason.
@@ -189,6 +208,13 @@ def los_agreement(samples, scenario):
 
     The planner's routine is evaluated at the position and time the referee
     reported, so this compares ARITHMETIC and not trajectories.
+
+    Frames, as in obstacle_agreement: the planner measures in its own
+    coordinates, on its own stations and obstacles, at the referee's position
+    mapped back by frames.to_planner; its margin, a length, is mapped forward
+    by frames.length_to_sim. A similarity scales every distance by s, so the
+    two margins are equal exactly when the referee's world is the planner's
+    under that map.
 
     `samples` is (t, position, referee margin or None for +infinity), collected
     while the plan was flying. "Unconstrained" has to be compared too, not
@@ -215,11 +241,12 @@ def los_agreement(samples, scenario):
 
     worst, worst_t, seen, window = 0.0, 0.0, 0, []
     for t, pos, got in samples:
-        p = np.asarray(pos[:spatial], dtype=float)
+        p = np.asarray(frames.to_planner(pos[:3], frame)[:spatial], dtype=float)
         # The planner measures per station; the referee reports the WORST over
         # all of them, so the comparison is against the minimum.
-        want = min(float(los_margin_at(p[None, :], np.array([t]), st, obstacles)[0])
-                   for st in stations)
+        want = frames.length_to_sim(
+            min(float(los_margin_at(p[None, :], np.array([t]), st, obstacles)[0])
+                for st in stations), frame)
         seen += 1
         if not np.isfinite(want) or got is None:
             if np.isfinite(want) != (got is not None):
@@ -254,10 +281,20 @@ def wait_until(url, pred, timeout_s, what):
 def main(plan_file, url):
     c = Checks()
     plan = json.load(open(plan_file))
+    # The planner's scenario, verbatim, and the same scenario where the sim
+    # put it. Every comparison below says which one it uses; see frames.py.
     scenario = json.load(open(f"scenarios/{plan['scenario']}.json"))
     sys.path.insert(0, "src/dsim_planner")
+    try:
+        frame = frames.check_plan_frame(plan, plan["scenario"])
+    except frames.FrameError as exc:
+        c.bad("the plan is in its scenario's frame", str(exc),
+              "a plan from before frames.py, or one solved before the table "
+              "changed: it would be flown beside its obstacles")
+        return c.failures
+    scenario_sim = frames.scenario_to_sim(scenario)
     T = float(scenario["T"])
-    start_p = scenario["start"][:3]
+    start_p = scenario_sim["start"][:3]
     expect = plan.get("expect", {})
     # The plan's own speed profile, for check 3, from the same sampler the
     # bridge uses -- an independent path from the controller's report.
@@ -397,7 +434,7 @@ def main(plan_file, url):
 
     # ---- 1. referee vs planner --------------------------------------------
     worst, worst_name, worst_t, active_disagreements = obstacle_agreement(
-        url, scenario, samples=41)
+        url, scenario, frame, samples=41)
     if worst is None:
         c.bad("referee agrees with the planner about the obstacles",
               "the referee published no obstacle field",
@@ -426,7 +463,7 @@ def main(plan_file, url):
         print("  n/a   this scenario has no stations, so nothing constrains "
               "line of sight")
     else:
-        los_worst, los_t, los_seen, los_window = los_agreement(los_samples, scenario)
+        los_worst, los_t, los_seen, los_window = los_agreement(los_samples, scenario, frame)
         if los_worst is None or los_seen == 0:
             c.bad("referee agrees with the planner about line of sight",
                   "no sight-line samples were taken during the window",

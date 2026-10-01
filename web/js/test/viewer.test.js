@@ -363,3 +363,37 @@ test("a station is drawn somewhere, and where the referee says", () => {
   assert.ok(Math.min(...xs) > 5 && Math.max(...xs) < 9);
   assert.ok(Math.min(...ys) > -5 && Math.max(...ys) < -1);
 });
+
+import { landmarkFaces } from "../shapes.js";
+import { readFileSync } from "node:fs";
+
+test("a yawed landmark box is turned, not drawn axis-aligned", () => {
+  // FAILS IF: the yaw is ignored -- a 2 x 0.2 box turned 90 deg must be long
+  // in y and thin in x, the opposite of the unturned one.
+  const ext = (yaw) => {
+    const pts = landmarkFaces([{ type: "box", center: [0, 0, 1], size: [2, 0.2, 2], yaw }], 0)
+      .flatMap((f) => f.pts);
+    const span = (i) => Math.max(...pts.map((p) => p[i])) - Math.min(...pts.map((p) => p[i]));
+    return [span(0), span(1)];
+  };
+  const [x0, y0] = ext(0);
+  const [x1, y1] = ext(Math.PI / 2);
+  assert.ok(Math.abs(x0 - 2) < 1e-9 && Math.abs(y0 - 0.2) < 1e-9);
+  assert.ok(Math.abs(x1 - 0.2) < 1e-9 && Math.abs(y1 - 2) < 1e-9);
+});
+
+test("every scenario's landmarks in scene.json are drawn, all three kinds", () => {
+  // FAILS IF: scene.json stops carrying the landmarks, or a kind is dropped
+  // by the drawing code (an unknown type yields no faces at all).
+  const scene = JSON.parse(readFileSync(new URL("../../scene.json", import.meta.url)));
+  const kinds = new Set();
+  for (const [name, world] of Object.entries(scene.worlds)) {
+    if (name === "empty") continue;
+    assert.ok(world.landmarks.length >= 10, `${name} has ${world.landmarks.length}`);
+    for (const lm of world.landmarks) {
+      kinds.add(lm.type);
+      assert.ok(landmarkFaces([lm], 0).length > 0, `${name} ${lm.name} draws nothing`);
+    }
+  }
+  assert.deepEqual([...kinds].sort(), ["box", "cylinder", "sphere"]);
+});

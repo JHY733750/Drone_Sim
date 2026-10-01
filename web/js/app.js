@@ -22,7 +22,7 @@
 //   app.js        state, HUD, input, the frame loop       (this file)
 
 import { add, scale } from "./vec3.js";
-import { droneFaces, obstacleFaces, hitMarkers, sightLines, stationFaces }
+import { droneFaces, landmarkFaces, obstacleFaces, hitMarkers, sightLines, stationFaces }
   from "./shapes.js";
 import { GROUP_LABEL, LEGEND, PALETTE, TICK_COLOUR, colourFor, widthFor }
   from "./palette.js";
@@ -289,6 +289,9 @@ function renderOnce() {
   // else about them.
   const world = S.scene.worlds[S.world] || {};
   const faces = obstacleFaces(S.clearance, world.colors, cam.az);
+  // Static scenery for the depth camera's SLAM, from scene.json: the one
+  // account of them, since they never move and the referee never sees them.
+  faces.push(...landmarkFaces(world.landmarks, cam.az));
   faces.push(...stationFaces(S.clearance));
   faces.push(...droneFaces(S.pose, S.scene.drone));
   renderer.faces(faces);

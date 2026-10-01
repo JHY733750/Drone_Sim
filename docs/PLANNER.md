@@ -45,7 +45,7 @@ python3 scripts/solve_plan.py --list     # inside the container
 | `wall` | 2D+t | a wall that **stands until t=5 and is then gone** |
 | `fence3d` | 3D+t | a moving fence; the demonstrated behaviour is the climb |
 | `door3d` | 3D+t | a doorway in time; the demonstrated behaviour is **waiting** |
-| `loiter` | 3D+t | 200 m scale, T=80 s, four orbiting bodies **and a station**; needs `state:=truth`, see below |
+| `loiter` | 3D+t | 200 m in the planner, flown at **s = 0.04** (8 m, 2.5 m up), T=80 s, four orbiting bodies **and a station** |
 
 Four are planned in **two** spatial dimensions plus time. They are solved that
 way and the resulting curve is flown at 1.5 m; lifting them into 3D would hand
@@ -91,7 +91,13 @@ stronger and lives in `check_planner.py`: the referee's live obstacle field
 against the **planner's own** `obstacle_positions_at()` -- two implementations
 of the same Bezier motion, in two languages, sampled 41 times across the
 window, including whether each obstacle is active at that instant. Measured
-agreement is exactly 0.0, against a 1e-6 bound.
+agreement was exactly 0.0 when both sides read identical numbers; since the
+frames change (below) the planner is evaluated on its own coordinates and its
+ANSWER mapped, so the comparison now also tests the map. Offline (the
+referee's obstacle.hpp on the generated yaml, check_planner's own comparison
+code): <= 2.7e-15 m for the s = 1 scenarios, 3.4e-10 m for loiter (the
+yaml's 9-decimal rounding of 0.04 x), against a 1e-6 bound; the
+pre-frames yaml reads 6.5..56 m. Not yet re-measured on a live run.
 
 ## The scenario clock
 
@@ -102,8 +108,34 @@ with `start_s` so the plan begins on the tick.
 
 There is no transit from a pad. It is not part of any plan, nothing certifies
 it, and the version that flew one collected five collisions before the run had
-begun -- the fence swept through the pad while the vehicle sat on it. (`loiter`
-starts 62.5 m up; a climb to that would be a minute of nothing.)
+begun -- the fence swept through the pad while the vehicle sat on it.
+
+## Where a scenario sits
+
+`scenarios/*.json` are the planner's numbers, verbatim. Everything the sim
+flies, scores or draws is in the SIM frame, `p_sim = s * (p - c)`, `t`
+unchanged, with one table and one map in
+`src/dsim_planner/dsim_planner/frames.py`. `c` is the centre of the
+horizontal bounding box of start, end and every obstacle control point
+(rounded to the cm; `gen_assets.py --check` fails if the planner moves it).
+`s = 1` except `loiter`, `s = 0.04`: 8 m long at 2.5 m, inside the optical
+flow's band, at the price of every speed scaling by s and the plan having to
+be re-solved with obstacles grown by `0.3 / s` planner metres. The map is
+uniform (z scales too) because a sphere has to stay a sphere.
+
+A Bezier maps exactly under an affine map of its control points, so
+`solve_plan.py` solves in planner coordinates and maps the answer once; its
+`--inflate` and `--v-max` are in sim units. Every plan records its `frame`;
+the launch and the bridge refuse one whose frame is not the scenario's.
+
+## SLAM landmarks
+
+`config/landmarks_<name>.yaml`: static boxes, cylinders and spheres for the
+depth camera, generated (seeded) by `gen_assets.py` via `scripts/landmarks.py`,
+drawn by the viewer, and in neither the referee nor the physics. They keep
+1.0 m from every plan, 0.5 m from every obstacle sweep and 0.5 m from every
+station sight line; `scripts/check_landmarks.py` gates that against every
+plan present, and `--self-test` proves it fails on planted ones.
 
 After the horizon `T` the controller holds the final point. Every obstacle's
 window ends at or before `T`, so past it the field is empty.
@@ -250,8 +282,9 @@ rather than a call into it. The solver never measures the sight line: it builds
 a **convex occlusion relaxation** and certifies that. So there are three
 things, not two — the certificate, the planner's own sampled measurement, and
 the referee's — and `check_planner.py` holds the two measurements against each
-other over the flown run. Measured on `loiter`: **2.13e-14 m over 728
-instants**, which is float noise, against a 1e-6 bound.
+other over the flown run. Measured on `loiter` at full scale: **2.13e-14 m
+over 728 instants**, which is float noise, against a 1e-6 bound. At s = 0.04
+the offline replica reads 2.2e-10 m over 801 instants (yaml rounding).
 
 That check earns its keep. It failed twice while being built, and both were
 real defects in the referee:
@@ -334,11 +367,10 @@ under 2.1° of commanded tilt and 1 cm of travel in the first 2.5 s.
 * Line of sight IS checked now. See below.
 * The estimator is a LOW-ALTITUDE one. Its only velocity aiding is optical
   flow, which needs the ground between 0.1 and 3 m, plus a rangefinder good to
-  4 m. `loiter` flies at 62.5 m: measured 48 m of tracking error on
-  `state:=est` and 2.2 cm on `state:=truth`, same plan. The gate says so
-  before it reports the failures. That is a real statement about the vehicle,
-  not a simulator artefact -- a machine with these sensors cannot hold station
-  at 60 m either.
+  4 m. `loiter` at full scale flew at 62.5 m: measured 48 m of tracking
+  error on `state:=est` and 2.2 cm on `state:=truth`. It is now flown at
+  s = 0.04, 2.5 m up, inside that band; `state:=est` there is NOT yet
+  flight-tested.
 * The lateral acceleration limit is ~8.3 m/s² at the 40° tilt clamp. That is
   the number the planner is missing a constraint for, and every plan here is
   kept under it by a speed cap chosen by hand rather than by anything in the

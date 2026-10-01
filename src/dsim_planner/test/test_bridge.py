@@ -46,3 +46,54 @@ def test_points_carry_the_feedforward():
     assert msg.points[100].acceleration.x == pytest.approx(0.0, abs=1e-9)
     assert msg.points[100].yaw == 0.3
     assert msg.points[-1].position.x == pytest.approx(9.5)
+
+
+# ---- the frame check ------------------------------------------------------
+# FAILS IF: the bridge flies a plan that is not in its scenario's frame --
+# above all one with no frame record, which is every plan solved before
+# frames.py and is in the planner's coordinates, beside its obstacles.
+import json  # noqa: E402
+import pathlib  # noqa: E402
+
+from dsim_planner import spacetime  # noqa: E402
+from dsim_planner.bridge_node import load_plan  # noqa: E402
+
+PLANS = pathlib.Path(__file__).resolve().parents[3] / "plans"
+
+
+def _write(tmp_path, doc):
+    p = tmp_path / "plan.json"
+    p.write_text(json.dumps(doc))
+    return str(p)
+
+
+def test_the_committed_seed_loads():
+    plan = load_plan(str(PLANS / "wall_seed.json"), "wall")
+    assert plan["frame"]["scenario"] == "wall"
+
+
+def test_a_plan_with_no_frame_is_refused(tmp_path):
+    doc = json.loads((PLANS / "wall_seed.json").read_text())
+    del doc["frame"]
+    with pytest.raises(spacetime.PlanError, match="no 'frame'"):
+        load_plan(_write(tmp_path, doc), "wall")
+
+
+def test_a_plan_in_a_stale_frame_is_refused(tmp_path):
+    doc = json.loads((PLANS / "loiter_seed.json").read_text())
+    doc["frame"]["scale"] = 1.0
+    with pytest.raises(spacetime.PlanError, match="re-solve"):
+        load_plan(_write(tmp_path, doc), "loiter")
+
+
+def test_a_plan_for_another_world_is_refused(tmp_path):
+    doc = json.loads((PLANS / "fence3d_seed.json").read_text())
+    with pytest.raises(spacetime.PlanError, match="solves scenario"):
+        load_plan(_write(tmp_path, doc), "wall")
+
+
+def test_with_no_scenario_given_the_plan_is_held_to_its_own(tmp_path):
+    doc = json.loads((PLANS / "wall_seed.json").read_text())
+    del doc["frame"]
+    with pytest.raises(spacetime.PlanError):
+        load_plan(_write(tmp_path, doc))

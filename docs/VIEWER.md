@@ -440,9 +440,9 @@ Two things the catalogue works out rather than being told:
   Seeds are still flyable from the command line.
 * **Which state source.** A plan whose control points go above the optical
   flow's `max_height_m` is launched `state:=truth`, and the dropdown says why.
-  `loiter` flies at 62.5 m: measured tracking error is 48 m on the estimate
-  against 2.2 cm on truth. That is the sensors being honest about their
-  envelope, not the controller failing.
+  At full scale `loiter` flew at 62.5 m and measured 48 m of error on the
+  estimate; it is now scaled to 2.5 m (docs/PLANNER.md), so no scenario
+  currently triggers this.
 
 While a run is coming up the line under the dropdown counts the seconds. If the
 launch exits, or produces no telemetry inside 90 s, it says so and shows the

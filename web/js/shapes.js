@@ -34,6 +34,37 @@ export function boxFaces(cx, cy, cz, sx, sy, sz, fill) {
   }));
 }
 
+/// A box turned by `yaw` about its vertical axis. Same faces as boxFaces;
+/// only the corners are rotated before they are placed.
+export function yawedBoxFaces(cx, cy, cz, sx, sy, sz, yaw, fill) {
+  const c = Math.cos(yaw);
+  const s = Math.sin(yaw);
+  const v = boxCorners(sx / 2, sy / 2, sz / 2)
+    .map((k) => [cx + c * k[0] - s * k[1], cy + s * k[0] + c * k[1], cz + k[2]]);
+  return QUADS.map((q, i) => ({
+    pts: q.map((k) => v[k]), fill: shadeHex(fill, QUAD_SHADE[i]), alpha: 1,
+  }));
+}
+
+/// The scenario's static SLAM landmarks, from scene.json (gen_assets.py
+/// writes the same list to config/landmarks_<name>.yaml). Scenery: opaque,
+/// one neutral colour so they never read as obstacles, and not in the
+/// referee's report because the referee does not know they exist.
+export function landmarkFaces(landmarks, camAz, fill = "#8a94a6") {
+  const faces = [];
+  for (const lm of landmarks || []) {
+    const [x, y, z] = lm.center;
+    if (lm.type === "box") {
+      faces.push(...yawedBoxFaces(x, y, z, lm.size[0], lm.size[1], lm.size[2], lm.yaw || 0, fill));
+    } else if (lm.type === "cylinder") {
+      faces.push(...cylinderFaces(x, y, z, lm.radius, lm.height, fill, camAz));
+    } else if (lm.type === "sphere") {
+      faces.push(...sphereFaces(x, y, z, lm.radius, fill, camAz, 14, 7, 1));
+    }
+  }
+  return faces;
+}
+
 export function cylinderFaces(cx, cy, cz, r, hgt, fill, camAz, seg = 20) {
   const hz = hgt / 2;
   const faces = [];

@@ -40,13 +40,16 @@ Choosing what flies (all optional, combine freely):
 make viz REFERENCE=lemniscate RADIUS=2.0 PERIOD=6   # built-in path, no planner
 make viz REFERENCE=hover                             # sit still at ALTITUDE (1.5 m)
 make viz WORLD=fence3d PLAN=plans/fence3d_N8_seg2.json   # fly a solved plan
-make viz WORLD=loiter PLAN=plans/loiter_N8_seg16.json STATE=truth
+make viz WORLD=loiter PLAN=plans/loiter_N8_seg8.json
 ```
 
 Defaults: `WORLD=empty REFERENCE=circle RADIUS=1.0 PERIOD=3.5 ALTITUDE=1.5
 STATE=est`. A plan's `WORLD` must be the scenario it was solved in, or the
-launch refuses. `loiter` needs `STATE=truth`: it flies at 62.5 m and the
-estimator's velocity aiding only works below 3 m (see *Scope*).
+launch refuses, and so does a plan not in its scenario's *frame*: every
+scenario is recentred on the origin (and `loiter` scaled by 0.04, to 2.5 m
+altitude) by `src/dsim_planner/dsim_planner/frames.py`. A solved plan from
+before that is refused; `scripts/reframe_plan.py` moves an s = 1 one, a
+loiter one must be re-solved. See docs/PLANNER.md, *Where a scenario sits*.
 
 Planner side:
 
