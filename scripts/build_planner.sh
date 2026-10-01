@@ -41,8 +41,23 @@ echo "== building bezier_opt (release) against $(python3 --version) =="
 
 WHEEL="$(ls -t "$OUT"/bezier_opt-*.whl | head -1)"
 echo "== installing $WHEEL -> $DEST =="
-pip install --quiet --break-system-packages --no-deps --force-reinstall --target "$DEST" "$WHEEL" \
+# --upgrade is what makes --target replace an existing install. Without it pip
+# prints "Target directory ... already exists" (hidden by --quiet), keeps the
+# OLD extension and exits 0 -- and the import check below still passes, on the
+# previous build. So the installed library is compared byte for byte with the
+# one in the wheel we just built.
+pip install --quiet --break-system-packages --no-deps --force-reinstall --upgrade --target "$DEST" "$WHEEL" \
   || { echo "FAIL: pip install failed"; exit 1; }
+python3 - "$WHEEL" "$DEST" <<'PY' || exit 1
+import hashlib, pathlib, sys, zipfile
+wheel, dest = sys.argv[1], pathlib.Path(sys.argv[2])
+with zipfile.ZipFile(wheel) as z:
+    name = next(n for n in z.namelist() if n.endswith(".so"))
+    built = hashlib.sha256(z.read(name)).hexdigest()
+installed = hashlib.sha256((dest / name).read_bytes()).hexdigest()
+assert built == installed, f"installed {name} is not the one just built ({installed[:12]} != {built[:12]})"
+print(f"  installed == built  {built[:12]}")
+PY
 
 echo "== checking the import (from the installed path, not the source tree) =="
 PYTHONPATH="$DEST:$SRC" python3 - <<'PY' || exit 1

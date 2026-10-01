@@ -52,7 +52,8 @@
  },
  "lift_z": 1.5,
  "init_curve": {
-  "mode": "straight"
+  "mode": "wait",
+  "power": 3
  },
  "obstacles": [
   {"name": "W0", "type": "column", "radius": 0.5, "color": "#e67e22", "control_points": [
