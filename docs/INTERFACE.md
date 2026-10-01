@@ -172,6 +172,56 @@ distribution. It does **not** promise bit-identical streams between runs: one
 generator feeds both sensor timers, so which draw lands in which reading
 depends on callback interleaving. Use `noise_seed:=0` for a fresh sequence.
 
+### Depth camera (standalone, not in `sim.launch.py` yet)
+
+`dsim_depthcam` simulates an Intel RealSense D435 depth stream. Its
+**outputs are shaped like realsense-ros 4.x** with the default `camera`
+namespace and name, so a consumer written against it should run unchanged on
+a real D435. Its inputs are simulation only.
+
+| Topic | Type | Notes |
+|---|---|---|
+| `/camera/camera/depth/color/points` | `sensor_msgs/msg/PointCloud2` | unorganised (`height` 1), valid points only, `x y z` float32, 12-byte step |
+| `/camera/camera/depth/image_rect_raw` | `sensor_msgs/msg/Image` | `16UC1`, millimetres, **0 = no return** |
+| `/camera/camera/depth/camera_info` | `sensor_msgs/msg/CameraInfo` | `plumb_bob`, zero distortion |
+| `/tf_static` | | `base_link` → `camera_link` → `camera_depth_frame` → `camera_depth_optical_frame` |
+
+All three carry `frame_id: camera_depth_optical_frame` (z forward, x right,
+y down) and the **stamp of the `/drone/truth` message the frame was rendered
+from**: pose, obstacle positions and stamp are the same instant. Frames fall
+on a 30 Hz grid in sim time, each within one truth period (4 ms) of it.
+`camera_depth_frame` is the identity, as on the real camera; `base_link` →
+`camera_link` is the mount (0.10 m forward, level, parameters `mount.x/y/z`,
+`mount.pitch_rad`, positive pitch DOWN). On hardware that last transform
+belongs to the vehicle's URDF, which is why `publish_mount_tf:=false` exists.
+
+The model: 424 × 240 (a D435 mode), 87 × 58° FOV with fx and fy each from
+their own FOV (223.4 and 216.5 px, so not quite square), depth **z** (not
+range) from 0.28 to 10 m, stereo noise `σ_z = z² · 0.08 / (fx · 0.050)` (7 mm
+at 1 m, 18 cm at 5 m) moving each point along its own pixel ray, optional
+random dropout, and a per-frame seed made from `noise.seed` and the stamp, so
+one pose at one stamp always renders the same frame. The cloud is the
+unrounded depth; the image is that depth rounded to the millimetre, so the
+two agree pixel for pixel to 0.5 mm (the real camera builds its cloud from
+the rounded image; the difference is far below the noise).
+
+It sees three things, by ray casting against analytic shapes: the ground
+(z = 0), the referee's obstacles from the **same**
+`config/obstacles_<world>.yaml` the referee reads, moved by the referee's own
+`dsim_eval/obstacle.hpp` on the same scenario clock (`scenario.start_s`) and
+absent outside their windows (a `column` has no top or bottom), and optional
+static landmarks — boxes with yaw, vertical cylinders centred at mid-height,
+spheres — from `landmarks_file` (format in `config/landmarks_example.yaml`).
+No edge artefacts, multipath, IR pattern or colour stream: it is cleaner
+than the real camera at depth discontinuities.
+
+```bash
+ros2 launch dsim_depthcam depthcam.launch.py world:=fence3d \
+    landmarks_file:=/ws/config/landmarks_example.yaml pitch_deg:=10
+```
+
+About 18 ms per frame on this machine with 30 primitives, single-threaded.
+
 ## State estimate
 
 `/drone/state_est` is what the controller flies on by default. It is shaped
@@ -412,8 +462,9 @@ parameter sets that cannot hover.
 ## Not built
 
 - **No obstacle sensing.** The referee knows the obstacles; your planner gets no
-  sensor stream. Fine if your planner assumes a known map. If it needs to
-  *discover* obstacles, a depth camera has to be added to the model.
+  sensor stream by default. Fine if your planner assumes a known map. If it
+  needs to *discover* obstacles, the depth camera (*Depth camera* above) exists
+  but is not yet launched with the simulator.
 - **No `/drone/goal` publisher.** Unclear whether goals should come from config,
   a topic, or your planner choosing them. Trivial once decided.
 - **No hardware path.** Low priority by design — see *Scope* in the README.

@@ -34,6 +34,17 @@ sources_dsim_estimation="src/attitude_filter.cpp src/velocity_filter.cpp"
 untestable_dsim_estimation=""
 sources_dsim_eval=""                                     # header-only geometry
 untestable_dsim_eval=""                                  # (the nodes are *_node.cpp)
+sources_dsim_depthcam=""                                 # header-only camera model
+untestable_dsim_depthcam=""                              # (the node is *_node.cpp; its
+                                                         # test_landmarks.cpp needs yaml-cpp,
+                                                         # which this host lacks: colcon only)
+
+# Include directories a package's host build needs BESIDES its own, for a
+# package that reuses another's headers. dsim_depthcam renders the referee's
+# obstacles with dsim_eval/obstacle.hpp rather than a copy of it. Paths are
+# relative to the repo root (this script cd's there), and point at the
+# UNMUTATED source on purpose: a mutation applies to the package under test.
+includes_dsim_depthcam="-I src/dsim_eval/include"
 
 audit_sources() {   # $1 = package
   local pkg="$1" listed found missing=0
@@ -57,8 +68,9 @@ build_and_run() {   # $1 = source dir, $2 = test file relative to it, $3 = packa
   grep -q "int main" "$1/$2" || main_lib="-lgtest_main"
   local expanded=""
   for f in $srcs; do expanded="$expanded $1/$f"; done
+  local extra; extra="$(eval echo "\${includes_$3:-}")"
   # shellcheck disable=SC2086
-  g++ -std=c++17 -O1 -I "$1/include" -I /usr/include/eigen3 \
+  g++ -std=c++17 -O1 -I "$1/include" $extra -I /usr/include/eigen3 \
       $expanded "$1/$2" \
       $main_lib -lgtest -pthread -o "$WORK/t" 2>"$WORK/build.log" || { echo "BUILD_FAIL"; return; }
   "$WORK/t" >"$WORK/run.log" 2>&1 && echo "ALL_PASS" || echo "SOME_FAIL"
@@ -126,6 +138,7 @@ check_baseline dsim_simctl test/test_pacer.cpp    || baseline=BAD
 check_baseline dsim_time   test/test_sim_epoch.cpp || baseline=BAD
 check_baseline dsim_estimation test/test_estimation.cpp || baseline=BAD
 check_baseline dsim_eval   test/test_obstacle.cpp || baseline=BAD
+check_baseline dsim_depthcam test/test_depthcam.cpp || baseline=BAD
 if [ "$baseline" != "ALL_PASS" ]; then
   # Without this guard every mutation below is "caught" by the same build
   # failure, and the script reports teeth it does not have. That happened the
@@ -443,6 +456,217 @@ run_mutation "a column with stations measured anyway, against nothing" \
           throw std::runtime_error(" \
   "        if (false) {
           throw std::runtime_error("
+
+# ---------------------------------------------------------------------------
+# The simulated depth camera. Its failures are the confidently-wrong kind: a
+# depth image with the wrong numbers in it still looks like a depth image. A
+# camera that reports range where it should report z is right at the centre
+# pixel and 38 % wrong at the edge; one whose obstacles ignore the scenario
+# clock shows the fence, just not where it is scored. Each mutation is one of
+# those.
+# ---------------------------------------------------------------------------
+PKG=dsim_depthcam
+TEST=test/test_depthcam.cpp
+
+run_mutation "sphere: the ray direction assumed unit length" \
+  "include/dsim_depthcam/geometry.hpp" \
+  "  const double t0 = (-b - sq) / a;
+  if (t0 > 0.0) {return t0;}
+  const double t1 = (-b + sq) / a;" \
+  "  const double t0 = (-b - sq);
+  if (t0 > 0.0) {return t0;}
+  const double t1 = (-b + sq);"
+
+run_mutation "sphere: the far root taken first (sees the back of every ball)" \
+  "include/dsim_depthcam/geometry.hpp" \
+  "  const double t0 = (-b - sq) / a;" \
+  "  const double t0 = (-b + sq) / a;"
+
+run_mutation "sphere: a root behind the camera accepted" \
+  "include/dsim_depthcam/geometry.hpp" \
+  "  return t1 > 0.0 ? t1 : kNoHit;
+}
+
+/// Vertical cylinder" \
+  "  return t1 != 0.0 ? std::abs(t1) : kNoHit;
+}
+
+/// Vertical cylinder"
+
+run_mutation "cylinder: end caps dropped" \
+  "include/dsim_depthcam/geometry.hpp" \
+  "  if (std::isfinite(p.half_height) && std::abs(d.z()) >= kParallel) {" \
+  "  if (false) {"
+
+run_mutation "cylinder: height ignored (every cylinder a column)" \
+  "include/dsim_depthcam/geometry.hpp" \
+  "          std::abs(o.z() + t * d.z() - p.center.z()) <= p.half_height)" \
+  "          true)"
+
+run_mutation "cylinder: height tested at the ray origin, not at the hit" \
+  "include/dsim_depthcam/geometry.hpp" \
+  "          std::abs(o.z() + t * d.z() - p.center.z()) <= p.half_height)" \
+  "          std::abs(o.z() - p.center.z()) <= p.half_height)"
+
+run_mutation "box: yaw applied with the wrong sign" \
+  "include/dsim_depthcam/geometry.hpp" \
+  "  const double c = p.cos_yaw, s = p.sin_yaw;" \
+  "  const double c = p.cos_yaw, s = -p.sin_yaw;"
+
+run_mutation "box: yaw ignored" \
+  "include/dsim_depthcam/geometry.hpp" \
+  "  const double c = p.cos_yaw, s = p.sin_yaw;" \
+  "  const double c = 1.0, s = 0.0;"
+
+run_mutation "box: the camera inside a box sees nothing" \
+  "include/dsim_depthcam/geometry.hpp" \
+  "  if (t_far > 0.0) {return t_far;}       // starting inside: the exit wall" \
+  ""
+
+run_mutation "plane: the ground seen through the sky (negative t accepted)" \
+  "include/dsim_depthcam/geometry.hpp" \
+  "  return t > 0.0 ? t : kNoHit;
+}
+
+inline double intersectSphere" \
+  "  return std::abs(t);
+}
+
+inline double intersectSphere"
+
+run_mutation "intrinsics: the full FOV where the half-angle belongs" \
+  "include/dsim_depthcam/depthcam.hpp" \
+  "  k.fx = 0.5 * c.width / std::tan(0.5 * c.hfov_rad);" \
+  "  k.fx = 0.5 * c.width / std::tan(c.hfov_rad);"
+
+run_mutation "intrinsics: principal point at W/2 instead of (W-1)/2" \
+  "include/dsim_depthcam/depthcam.hpp" \
+  "  k.cx = 0.5 * (c.width - 1);" \
+  "  k.cx = 0.5 * c.width;"
+
+run_mutation "noise: sigma linear in depth instead of quadratic" \
+  "include/dsim_depthcam/depthcam.hpp" \
+  "  return z * z * c.subpixel / (k.fx * c.baseline_m);" \
+  "  return z * c.subpixel / (k.fx * c.baseline_m);"
+
+run_mutation "noise: fy where the baseline's fx belongs" \
+  "include/dsim_depthcam/depthcam.hpp" \
+  "  return z * z * c.subpixel / (k.fx * c.baseline_m);" \
+  "  return z * z * c.subpixel / (k.fy * c.baseline_m);"
+
+run_mutation "noise: never applied" \
+  "include/dsim_depthcam/depthcam.hpp" \
+  "      if (cfg.noise) {z += depthSigma(z, cfg, k) * gauss(rng);}" \
+  "      if (cfg.noise) {z += 0.0 * gauss(rng);}"
+
+run_mutation "dropout ignored" \
+  "include/dsim_depthcam/depthcam.hpp" \
+  "      if (cfg.dropout > 0.0 && unit(rng) < cfg.dropout) {continue;}" \
+  "      if (cfg.dropout > 0.0 && unit(rng) < 0.0) {continue;}"
+
+run_mutation "the frame seed ignored (every frame the same noise)" \
+  "include/dsim_depthcam/depthcam.hpp" \
+  "  std::mt19937_64 rng(seed);" \
+  "  std::mt19937_64 rng(1);"
+
+run_mutation "depth reported as range along the ray, not z" \
+  "include/dsim_depthcam/depthcam.hpp" \
+  "        z = std::min(z, intersect(p, o, d));" \
+  "        z = std::min(z, intersect(p, o, d) * d.norm());"
+
+run_mutation "the last primitive hit wins, not the nearest" \
+  "include/dsim_depthcam/depthcam.hpp" \
+  "        z = std::min(z, intersect(p, o, d));" \
+  "        {const double h = intersect(p, o, d); if (std::isfinite(h)) {z = h;}}"
+
+run_mutation "minimum range applied per primitive (sees through near objects)" \
+  "include/dsim_depthcam/depthcam.hpp" \
+  "        z = std::min(z, intersect(p, o, d));" \
+  "        {const double h = intersect(p, o, d); if (h >= cfg.min_range_m) {z = std::min(z, h);}}"
+
+run_mutation "no maximum range clip" \
+  "include/dsim_depthcam/depthcam.hpp" \
+  "      if (z < cfg.min_range_m || z > cfg.max_range_m) {continue;}" \
+  "      if (z < cfg.min_range_m) {continue;}"
+
+run_mutation "image rows flipped against the cloud" \
+  "include/dsim_depthcam/depthcam.hpp" \
+  "      const int idx = v * cfg.width + u;" \
+  "      const int idx = (cfg.height - 1 - v) * cfg.width + u;"
+
+run_mutation "image built from the depth before noise" \
+  "include/dsim_depthcam/depthcam.hpp" \
+  "      if (cfg.noise) {z += depthSigma(z, cfg, k) * gauss(rng);}
+      if (cfg.dropout > 0.0 && unit(rng) < cfg.dropout) {continue;}
+      if (z < cfg.min_range_m || z > cfg.max_range_m) {continue;}
+
+      const int idx = v * cfg.width + u;
+      f.depth_m[idx] = z;
+      const double raw = std::round(z / cfg.depth_unit_m);" \
+  "      const double z_true = z;
+      if (cfg.noise) {z += depthSigma(z, cfg, k) * gauss(rng);}
+      if (cfg.dropout > 0.0 && unit(rng) < cfg.dropout) {continue;}
+      if (z < cfg.min_range_m || z > cfg.max_range_m) {continue;}
+
+      const int idx = v * cfg.width + u;
+      f.depth_m[idx] = z;
+      const double raw = std::round(z_true / cfg.depth_unit_m);"
+
+run_mutation "obstacles on the sim clock (scenario.start_s not subtracted)" \
+  "include/dsim_depthcam/depthcam.hpp" \
+  "  const double t = sim_time_s - w.scenario_start_s;" \
+  "  const double t = sim_time_s;"
+
+run_mutation "an obstacle outside its window parked at its endpoint, not absent" \
+  "include/dsim_depthcam/depthcam.hpp" \
+  "    if (!o.activeAt(t)) {continue;}" \
+  ""
+
+run_mutation "an obstacle frozen where it starts" \
+  "include/dsim_depthcam/depthcam.hpp" \
+  "    const auto c = o.centreAt(t);" \
+  "    const auto c = o.centreAt(o.tStart());"
+
+run_mutation "a column rendered as a ball" \
+  "include/dsim_depthcam/depthcam.hpp" \
+  "    if (o.type == \"column\") {" \
+  "    if (false) {"
+
+run_mutation "optical frame: x left instead of right" \
+  "include/dsim_depthcam/depthcam.hpp" \
+  "  R << 0.0, 0.0, 1.0,
+    -1.0, 0.0, 0.0,
+    0.0, -1.0, 0.0;" \
+  "  R << 0.0, 0.0, 1.0,
+    1.0, 0.0, 0.0,
+    0.0, 1.0, 0.0;"
+
+run_mutation "optical frame: y up instead of down" \
+  "include/dsim_depthcam/depthcam.hpp" \
+  "    0.0, -1.0, 0.0;" \
+  "    0.0, 1.0, 0.0;"
+
+run_mutation "mount pitch sign reversed (positive looks up)" \
+  "include/dsim_depthcam/depthcam.hpp" \
+  "  T.linear() = Eigen::AngleAxisd(m.pitch_rad, Eigen::Vector3d::UnitY()).toRotationMatrix();" \
+  "  T.linear() = Eigen::AngleAxisd(-m.pitch_rad, Eigen::Vector3d::UnitY()).toRotationMatrix();"
+
+run_mutation "mount offset ignored" \
+  "include/dsim_depthcam/depthcam.hpp" \
+  "  T.translation() = m.offset;" \
+  "  T.translation().setZero();"
+
+run_mutation "body attitude ignored (camera always looks along world x)" \
+  "include/dsim_depthcam/depthcam.hpp" \
+  "  return T_world_base * baseToCameraLink(m) * T_link_opt;" \
+  "  Eigen::Isometry3d T_pos = Eigen::Isometry3d::Identity();
+  T_pos.translation() = T_world_base.translation();
+  return T_pos * baseToCameraLink(m) * T_link_opt;"
+
+run_mutation "a truncated control polygon accepted" \
+  "include/dsim_depthcam/depthcam.hpp" \
+  "  if (flat.size() < 8 || flat.size() % 4 != 0) {" \
+  "  if (flat.size() < 4) {"
 
 PKG=dsim_control
 TEST=test/test_control.cpp

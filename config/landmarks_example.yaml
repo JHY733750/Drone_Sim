@@ -1,0 +1,12 @@
+# Static landmarks for the simulated depth camera (dsim_depthcam), and the
+# fixture its tests load. Hand-written, not generated.
+#
+#   box       center [x, y, z], size [sx, sy, sz], yaw in radians about world z
+#   cylinder  vertical axis, center at MID-height: radius, height
+#   sphere    center, radius
+#
+# World frame, metres. Pass with landmarks_file:=<path>; empty means none.
+landmarks:
+  - {name: L0, type: box, center: [3.0, -1.5, 1.0], size: [1.0, 0.5, 2.0], yaw: 0.3}
+  - {name: L1, type: cylinder, center: [4.0, 1.5, 1.0], radius: 0.4, height: 2.0}
+  - {name: L2, type: sphere, center: [6.0, 0.0, 1.5], radius: 0.5}
