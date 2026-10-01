@@ -11,6 +11,57 @@ Humble — nothing here touches it.
 with round, self-consistent numbers chosen to fly well. That is the right
 trade for comparing planners against each other; see *Scope* below.
 
+## Cheatsheet
+
+Everything runs on the **host**, from the repo root. `make viz` starts the
+container itself if it is down.
+
+```bash
+make viz                 # start sim + browser viewer; prints the URL (port 8080)
+make status              # up? publishing? run it twice: elapsed_s must grow
+make stop                # stop sim + viewer (container stays up)
+make down                # stop the container too
+tail -f logs/sim.log     # what the simulator is saying (viewer: logs/viz.log)
+```
+
+`make viz` returns only once the sim is actually publishing. Once the page is
+open, the scenario dropdown switches runs without the command line.
+
+`make viz` does **not** rebuild. After changing code under `src/`, rebuild
+first (`make fly`, `make plan` and `make sim` do this themselves):
+
+```bash
+docker compose -f docker/compose.yaml exec sim bash -lc "colcon build --symlink-install"
+```
+
+Choosing what flies (all optional, combine freely):
+
+```bash
+make viz REFERENCE=lemniscate RADIUS=2.0 PERIOD=6   # built-in path, no planner
+make viz REFERENCE=hover                             # sit still at ALTITUDE (1.5 m)
+make viz WORLD=fence3d PLAN=plans/fence3d_N8_seg2.json   # fly a solved plan
+make viz WORLD=loiter PLAN=plans/loiter_N8_seg16.json STATE=truth
+```
+
+Defaults: `WORLD=empty REFERENCE=circle RADIUS=1.0 PERIOD=3.5 ALTITUDE=1.5
+STATE=est`. A plan's `WORLD` must be the scenario it was solved in, or the
+launch refuses. `loiter` needs `STATE=truth`: it flies at 62.5 m and the
+estimator's velocity aiding only works below 3 m (see *Scope*).
+
+Planner side:
+
+```bash
+make planner-sync        # pull the planner worktree (needs .env.local, see .env.local.example)
+make planner             # rebuild its Rust solver in the container
+make scenarios           # re-import scenarios/ from it and regenerate assets
+make solve SCENARIO=fence3d N=8 NSEG=2     # -> plans/fence3d_N8_seg2.json
+make plan  PLAN=plans/fence3d_N8_seg2.json # fly it headless and grade it
+```
+
+Checks: `make test` (all suites), `make fly` (headless flight gate),
+`make verify` (mutation check + asset drift, host only). `make help` lists
+everything.
+
 ## Run it
 
 One-time (already done on this machine):
@@ -24,10 +75,16 @@ Then:
 ```bash
 make build      # build the image (once, ~10 min)
 make up         # start the container
-make sim        # build the workspace and fly
+docker compose -f docker/compose.yaml exec sim bash -lc "colcon build --symlink-install"
+make viz        # start the sim and the browser viewer
 ```
 
-You should see the drone take off and fly a 2 m circle at 1.5 m altitude.
+Open the printed URL and you should see the drone take off and fly a 1 m
+circle at 1.5 m altitude.
+
+`make sim` builds the workspace and launches with the Gazebo GUI, flying a
+2 m circle on a 12 s lap. It needs a display, which this machine does not
+have — see *Seeing it fly*.
 
 ## Plug in your planner
 
@@ -88,6 +145,8 @@ src/dsim_planner/           space-time Bezier (x, y, z, t) -> /drone/trajectory,
 src/dsim_sensors/           simulated rangefinder, optical flow and compass, with noise
 src/dsim_estimation/        attitude + velocity from those sensors; what the controller flies on
 src/dsim_bringup/           launch, bridge, RViz
+src/dsim_simctl/            the only write path into the sim: pause, playback speed, reset
+src/dsim_time/              shared rule: sim time going backwards means the run restarted
 scripts/flight_check.sh     headless "does it actually fly" gate
 scripts/plan_check.sh       headless "did the plan fly as its file predicts" gate
 scripts/check_planner.py    the grader behind it: world vs referee, feedforward, hits
@@ -96,8 +155,15 @@ scripts/solve_plan.py       solve a scenario into a plan, and say if the vehicle
 scripts/plot_run.py         CSV -> SVG, no dependencies
 scripts/kill_sim.sh         clear leftover sim processes
 scripts/run_sim.sh          make viz -- start viewer + sim (two launches), verify both are up
+scripts/stop_sim.sh         make stop
+scripts/sim_status.sh       make status -- is it up and publishing?
+scripts/reset_pose.sh       teleport the drone back to a start pose between trials
+scripts/mutation_check.sh   make verify -- break the code on purpose, demand the tests notice
 scripts/check_telemetry.py  cross-check a running sim's telemetry against physics
 scripts/check_estimator.py  the estimate against ground truth, live
+scripts/check_sensors.py    live sensor noise vs config, and vs ground truth
+scripts/check_simcontrol.py pause/speed/reset against a running sim
+scripts/check_twist_frame.py is Gazebo's odometry twist in body or world frame?
 src/dsim_viz/               one-port viewer server + the overlay geometry it sends
 web/                        the browser viewer (dependency-free, draw-only)
 docs/VIEWER.md              how to watch from any tailnet device
@@ -143,7 +209,7 @@ the way to watch it, and it needs no display on this machine at all.
 **There is no X display on this machine** — the only X sockets are
 GDM's greeter sockets, no Xorg/Xwayland is running, and every login is a remote
 SSH session. The Gazebo GUI has nothing to render to, so `gui:=true` fails with
-"unable to open display". Three ways round it:
+"unable to open display". Ways round it:
 
 | | |
 |---|---|
@@ -189,7 +255,7 @@ suspects instead of one.
 ## Verification
 
 ```bash
-make test                         # C++ invariants + overlay geometry + viewer maths
+make test                         # C++ invariants + overlay geometry + viewer maths + planner bridge
 make verify                       # mutation check + generated-asset drift (host)
 make fly                          # headless: proves it flies AND reports honestly
 make plan PLAN=plans/x.json       # headless: flies a space-time plan, grades the hits
