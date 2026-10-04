@@ -340,6 +340,13 @@ private:
   /// logged, so a run that crept through a degenerate stretch says so.
   void onSlamStatus(const diagnostic_msgs::msg::DiagnosticStatus & msg)
   {
+    // LOST before SLAM has ever tracked is start-up ("no point cloud received
+    // yet"), not a loss: measured, it latched the hold 0.2 s into every run,
+    // before the camera's first frame. Only a SLAM that was tracking can lose.
+    if (msg.level == diagnostic_msgs::msg::DiagnosticStatus::OK) {
+      slam_ever_tracked_ = true;
+    }
+    if (!slam_ever_tracked_) {return;}
     if (msg.level == diagnostic_msgs::msg::DiagnosticStatus::ERROR) {
       latchSlamHold("SLAM reports LOST: " + msg.message);
     } else if (msg.level == diagnostic_msgs::msg::DiagnosticStatus::WARN) {
@@ -348,12 +355,18 @@ private:
     }
   }
 
-  /// The user's rule for losing SLAM: HOLD. Stop following the plan and hover
-  /// where SLAM last put the vehicle, for the rest of the run (a reset clears
-  /// it). Latched rather than resumed on recovery, because a pose that came
-  /// back after a gap may have jumped, and silently picking the plan up again
-  /// from there would hide that. Not a motor cut: velocity and attitude come
-  /// from other sources and are still good, which is what holding needs.
+  /// The user's rule for losing SLAM: HOLD. Stop following the plan and hover,
+  /// for the rest of the run (a reset clears it). Latched rather than resumed
+  /// on recovery, because a pose that came back after a gap may have jumped,
+  /// and silently picking the plan up again from there would hide that. Not a
+  /// motor cut: velocity and attitude come from other sources and are still
+  /// good, which is what holding needs.
+  ///
+  /// The hold is on VELOCITY, not on a point: the position error is zeroed
+  /// every step, so the loop brakes to a stop and keeps velocity at zero. A
+  /// point hold steers by the position source, and the position source is
+  /// the thing that just failed -- measured: holding a point on a drifting
+  /// SLAM pose flew the vehicle 84 m away while it was "holding".
   void latchSlamHold(const std::string & why)
   {
     if (slam_lost_) {return;}
@@ -425,6 +438,7 @@ private:
       mux_->reset(now);
       slam_lost_ = false;
       slam_hold_pending_ = false;
+      slam_ever_tracked_ = false;
     }
 
     State state;
@@ -462,7 +476,7 @@ private:
         std::lock_guard<std::mutex> lock(state_mutex_);
         slam_age = mux_->slamAge(now);
       }
-      if (slam_age > slam_timeout_s_) {
+      if (slam_ever_tracked_ && slam_age > slam_timeout_s_) {
         char buf[96];
         std::snprintf(buf, sizeof(buf), "no SLAM pose for %.2f s", slam_age);
         latchSlamHold(buf);
@@ -472,15 +486,14 @@ private:
     Reference ref;
     if (slam_lost_) {
       if (slam_hold_pending_) {
-        slam_hold_position_ = state.position;
         slam_hold_yaw_ = yawFromQuat(state.orientation);
         slam_hold_pending_ = false;
+        controller_->resetIntegral();   // it integrated a position error that no longer exists
       }
-      ref.position = slam_hold_position_;
+      ref.position = state.position;    // zero position error: a velocity hold
       ref.yaw = slam_hold_yaw_;
       RCLCPP_ERROR_THROTTLE(
-        get_logger(), steady_, 5000, "HOLDING at (%.2f, %.2f, %.2f): SLAM was lost",
-        slam_hold_position_.x(), slam_hold_position_.y(), slam_hold_position_.z());
+        get_logger(), steady_, 5000, "HOLDING (zero velocity): SLAM was lost");
     } else if (auto sampled = buffer_.sample(now)) {
       ref = *sampled;
       hold_valid_ = false;
@@ -674,7 +687,7 @@ private:
   double slam_timeout_s_ {0.5};
   bool slam_lost_ {false};
   bool slam_hold_pending_ {false};
-  Eigen::Vector3d slam_hold_position_ {Eigen::Vector3d::Zero()};
+  bool slam_ever_tracked_ {false};
   double slam_hold_yaw_ {0.0};
 
   bool hold_valid_ {false};

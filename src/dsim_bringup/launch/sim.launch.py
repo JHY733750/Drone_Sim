@@ -445,6 +445,7 @@ def launch_setup(context, *args, **kwargs):
             parameters=[{'use_sim_time': False,
                          'plan_file': plan,
                          'scenario': scenario_name,
+                         'yaw_mode': LaunchConfiguration('yaw_mode').perform(context),
                          'start_s': float(scenario['sim']['start_s'])}],
         ))
 
@@ -600,6 +601,9 @@ def generate_launch_description():
                               description='est (the gyro, gated and low-passed '
                               'per gains.yaml) | truth (the engine\'s angular '
                               'velocity, gated only); empty follows state:='),
+        DeclareLaunchArgument('yaw_mode', default_value='travel',
+                              description='plan flights: travel (nose along the path, so '
+                              'the forward camera sees ahead) | fixed (yaw 0)'),
         DeclareLaunchArgument('depthcam', default_value='auto',
                               description='simulated D435 point cloud: true | false | '
                               'auto (on when src_position:=slam)'),

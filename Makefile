@@ -100,7 +100,7 @@ test-viewer:
 # make fly SRC_POSITION=slam ...) must be handed INTO the container
 # explicitly: `docker compose exec` does not inherit the host environment, so
 # without this they were accepted by make and silently dropped.
-SIM_ENV = $(foreach v,STATE SRC_POSITION SRC_VELOCITY SRC_ATTITUDE SRC_BODY_RATE DEPTHCAM SLAM,$(if $($(v)),-e $(v)="$($(v))",))
+SIM_ENV = $(foreach v,STATE SRC_POSITION SRC_VELOCITY SRC_ATTITUDE SRC_BODY_RATE DEPTHCAM SLAM YAW_MODE,$(if $($(v)),-e $(v)="$($(v))",))
 
 fly:
 	$(COMPOSE) exec $(SIM_ENV) sim bash -lc "colcon build --symlink-install >/dev/null && \

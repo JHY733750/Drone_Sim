@@ -59,6 +59,7 @@ SRC_ARGS=""
 [ -n "${SRC_BODY_RATE:-}" ] && SRC_ARGS="$SRC_ARGS src_body_rate:=$SRC_BODY_RATE"
 [ -n "${DEPTHCAM:-}" ]      && SRC_ARGS="$SRC_ARGS depthcam:=$DEPTHCAM"
 [ -n "${SLAM:-}" ]          && SRC_ARGS="$SRC_ARGS slam:=$SLAM"
+[ -n "${YAW_MODE:-}" ]      && SRC_ARGS="$SRC_ARGS yaw_mode:=$YAW_MODE"
 WEB_PORT="${WEB_PORT:-8080}"
 # Interface the viewer binds to. Set it to your Tailscale IP to keep the port
 # off the local LAN.
