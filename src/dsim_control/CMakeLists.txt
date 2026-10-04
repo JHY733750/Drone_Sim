@@ -22,6 +22,7 @@ find_package(Eigen3 REQUIRED)
 # --- core library: no ROS, so it can be unit tested in isolation ------------
 add_library(dsim_control_core SHARED
   src/body_rate_source.cpp
+  src/state_mux.cpp
   src/mixer.cpp
   src/se3_controller.cpp
   src/trajectory_buffer.cpp

@@ -18,6 +18,15 @@ PLAN="${PLAN:-plans/fence3d_seed.json}"
 # flow's height band has no velocity aiding, so it needs truth -- the grader
 # says so explicitly when it sees one, and `loiter` is the shipped example.
 STATE="${STATE:-est}"
+# Per-field overrides of STATE, each est | truth (SRC_POSITION also takes
+# slam, which the controller refuses until it is wired). Empty follows STATE.
+# SRC_ATTITUDE=truth SRC_BODY_RATE=truth flies the rotational loop on exact
+# state while position and velocity stay on the estimate.
+SRC_ARGS=""
+[ -n "${SRC_POSITION:-}" ]  && SRC_ARGS="$SRC_ARGS src_position:=$SRC_POSITION"
+[ -n "${SRC_VELOCITY:-}" ]  && SRC_ARGS="$SRC_ARGS src_velocity:=$SRC_VELOCITY"
+[ -n "${SRC_ATTITUDE:-}" ]  && SRC_ARGS="$SRC_ARGS src_attitude:=$SRC_ATTITUDE"
+[ -n "${SRC_BODY_RATE:-}" ] && SRC_ARGS="$SRC_ARGS src_body_rate:=$SRC_BODY_RATE"
 WEB_PORT="${WEB_PORT:-8080}"
 
 source /opt/ros/jazzy/setup.bash
@@ -39,7 +48,7 @@ if pgrep -f "$SIM_PROCS" >/dev/null 2>&1; then
   echo "FAIL: could not clear existing sim processes:"; pgrep -af "$SIM_PROCS" | head; exit 1
 fi
 
-echo "== launching ($SCENARIO, plan $PLAN, state=$STATE, headless; scenario t=0 at sim ${START_S}s) =="
+echo "== launching ($SCENARIO, plan $PLAN, state=$STATE$SRC_ARGS, headless; scenario t=0 at sim ${START_S}s) =="
 # The viewer is its own launch now (see viz.launch.py): this script reads the
 # run through its /snapshot endpoint, so it has to bring one up itself. Started
 # first, because the poll below asks it whether the simulator has appeared.
@@ -48,7 +57,7 @@ setsid ros2 launch dsim_bringup viz.launch.py web_port:="$WEB_PORT" \
 VIZ_PID=$!
 
 setsid ros2 launch dsim_bringup sim.launch.py \
-    world:="$SCENARIO" plan:="/ws/$PLAN" gui:=false state:="$STATE" \
+    world:="$SCENARIO" plan:="/ws/$PLAN" gui:=false state:="$STATE" $SRC_ARGS \
     >/tmp/plan_check.log 2>&1 &
 LAUNCH_PID=$!
 

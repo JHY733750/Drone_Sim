@@ -17,6 +17,7 @@ publish trajectories, it flies them and scores the result.**
 | sim → you | `/drone/optical_flow` | `dsim_msgs/msg/OpticalFlow` | 50 Hz |
 | sim → you | `/drone/mag` | `sensor_msgs/msg/MagneticField` | 50 Hz |
 | sim → you | `/drone/state_est` | `nav_msgs/msg/Odometry` | 250 Hz |
+| sim → you | `/drone/truth_exact` | `nav_msgs/msg/Odometry` | every physics step (1 kHz) |
 | sim → you | `/drone/estimator_debug` | `dsim_msgs/msg/EstimatorDebug` | 250 Hz |
 | sim → you | `/sim/state` | `dsim_msgs/msg/SimState` | 5 Hz |
 | sim → you | `/drone/eval/clearance` | `dsim_msgs/msg/ClearanceReport` | 20 Hz |
@@ -176,16 +177,15 @@ depends on callback interleaving. Use `noise_seed:=0` for a fresh sequence.
 
 `/drone/state_est` is what the controller flies on by default. It is shaped
 exactly like `/drone/truth` — `nav_msgs/Odometry`, `frame_id: world`,
-`child_frame_id: base_link`, twist in the **body** frame per REP-145 — so the
-controller consumes it through a topic remap and nothing in `dsim_control`
-knows which of the two it is reading. That is the point: a run on the
-estimate and a run on truth differ in one launch argument and nothing else.
+`child_frame_id: base_link`, twist in the **body** frame per REP-145 — so a
+run on the estimate and a run on truth differ in launch arguments and nothing
+else.
 
 | Field | Comes from | Notes |
 |---|---|---|
 | `pose.orientation` | gyro integrated at 250 Hz; roll/pitch pulled to the accelerometer's gravity direction, yaw to the magnetometer's tilt-compensated heading | Mahony-style complementary filter, `src/dsim_estimation/include/dsim_estimation/attitude_filter.hpp` |
 | `twist.linear` (body) | accelerometer rotated with the estimated attitude, gravity removed, integrated; pinned horizontally by the optical flow (`flow_tau_s`) and vertically by the rangefinder through a second-order altitude / climb-rate pair | `velocity_filter.hpp` |
-| `twist.angular` | the raw gyro sample | the controller does not read it here — it takes rates from `/drone/imu` and gates them itself |
+| `twist.angular` | the raw gyro sample | the controller does not read it here — with `body_rate` on `est` it takes rates from `/drone/imu` and gates them itself |
 | `pose.position` | **ground truth, copied** | no position sensor exists yet; see below |
 
 **Position is still truth**, by decision. The simulator has no position
@@ -197,12 +197,62 @@ falling back. Until then the position loop closes on perfect position, and
 the estimate is exercised where it matters most to a quadrotor: the attitude
 and velocity loops, which are the fast ones.
 
-**`state:=est|truth`** on `sim.launch.py` chooses, default `est`. Only the
-controller's subscription is remapped; the referee, the sensors and the
-viewer always see truth, and the estimator itself reads truth for position.
-`state:=est` with `sensors:=false` is refused at launch — a controller whose
-state source never publishes sits on the ground with its motors cut, which
-looks like a quiet, healthy sim until someone asks why it never took off.
+### Choosing the state source, per field
+
+The controller consumes four things, and each is switchable on its own, so a
+sensor's noise can be ruled in or out without replacing everything else:
+
+| field | `est` | `truth` |
+|---|---|---|
+| position | `/drone/state_est` pose (itself truth, copied — see above) | `/drone/truth_exact` |
+| velocity | `/drone/state_est` twist.linear, rotated with the **estimate's own** attitude | `/drone/truth_exact` |
+| attitude | `/drone/state_est` orientation | `/drone/truth_exact` |
+| body rate | `/drone/imu` gyro, plausibility-gated and low-passed per `gains.yaml` | `/drone/truth_exact` twist.angular, gated only (no filter) |
+
+```bash
+ros2 launch dsim_bringup sim.launch.py state:=truth            # all four truth
+ros2 launch dsim_bringup sim.launch.py state:=est              # all four est (default)
+ros2 launch dsim_bringup sim.launch.py src_attitude:=truth src_body_rate:=truth
+SRC_VELOCITY=truth scripts/run_sim.sh                          # same, via the scripts
+```
+
+`state:=` sets all four; `src_position`, `src_velocity`, `src_attitude`,
+`src_body_rate` (each `est | truth`, empty = follow `state:=`) override one
+field. The scripts take them as `SRC_POSITION` … `SRC_BODY_RATE`, the way they
+take `STATE` (`run_sim.sh`, `flight_check.sh`, `plan_check.sh`). The viewer's
+scenario dropdown does **not** carry them: a relaunch from the browser flies
+the catalogue's `state` for that run, all four fields together.
+
+`src_position:=slam` is an accepted name reserved for `/slam/odom`, and the
+controller **refuses it at startup** (FATAL, process exits) until that is
+wired. Unknown names are refused by the launch before Gazebo starts. Any field
+on `est` with `sensors:=false` is refused at launch — a controller whose state
+source never publishes sits on the ground with its motors cut, which looks
+like a quiet, healthy sim until someone asks why it never took off.
+
+**What it flew on is recorded**: the controller logs
+`state sources: position=… velocity=… attitude=… body_rate=…` once at
+startup, and every `/drone/control_debug` carries `source_position`,
+`source_velocity`, `source_attitude`, `source_body_rate`. `web/current.json`
+gets `sources` and a `state` of `est`, `truth` or `mixed`.
+
+**Truth means truth.** `/drone/truth_exact` comes from the `dsim_truth`
+Gazebo system plugin: the base link's world pose and its world linear and
+angular velocity, read from the physics engine on every step and rotated into
+the body frame. Nothing is differentiated, averaged or delayed. It exists
+because `/drone/truth`'s twist does not qualify: Gazebo's `OdometryPublisher`
+differences the pose every physics step and averages the last **10** of those
+differences (window hard-coded in `libgz-sim8-odometry-publisher-system`
+8.15.0 — four `mov $0xa,%esi` ahead of `RollingMean::SetWindowSize` in its
+constructor; no SDF parameter), so its velocity is a 10 ms boxcar about 5 ms
+old, and its angular velocity is the one that spiked to 626 rad/s on a
+quaternion sign flip. `/drone/truth`'s **pose** is exact (straight from the
+engine) and the referee, the sensors and the viewer keep reading it.
+
+Each selected source is watched for staleness on its own (`odom_timeout_s`
+for the Odometry streams, `imu_timeout_s` for the gyro) and the motors are cut
+with a warning naming the source that went quiet. A source that is not
+selected is not subscribed.
 
 **`/drone/estimator_debug`** reports every step: the attitude and gyro-bias
 estimates, the fused velocity, the last flow-derived world velocity, the
@@ -267,11 +317,12 @@ vehicle on the floor; `kp_mag` at 0 (mag not fused) reports the gyro-only
 branch with the yaw error at 0.31° and drifting.
 
 One consequence for existing tooling: `scripts/check_telemetry.py` asserts
-`|velocity_world| == |odom twist|` between the controller's telemetry and
-`/drone/truth`. With `state:=est` the controller reports the *estimated*
-velocity, so that identity now holds only to the estimation error (measured
-2.4–5.7 cm/s in the turn against a 4 mm/s tolerance), and `make fly` fails
-on it while the flight itself passes.
+`|velocity_world| == |odom twist|` between the controller's telemetry and the
+relay's `/drone/viz/state`, which follows the controller's **velocity**
+source (`/drone/state_est` or `/drone/truth_exact`), so the identity is about
+the controller's frame handling and not about the estimator. Compared against
+`/drone/truth` instead, a velocity on `est` would differ by the estimation
+error (measured 2.4–5.7 cm/s in the turn against a 4 mm/s tolerance).
 
 ## Publishing a trajectory
 

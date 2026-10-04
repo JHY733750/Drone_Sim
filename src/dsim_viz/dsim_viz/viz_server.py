@@ -109,8 +109,8 @@ class State:
         self.lock = threading.Lock()
         self.seq = 0                # bumped by every message of any kind
         self.odom = None
-        # The Odometry the CONTROLLER flew on: /drone/truth or /drone/state_est,
-        # whichever state:= selected. Kept apart from odom, which is always
+        # The Odometry the CONTROLLER took its velocity from: /drone/state_est
+        # or /drone/truth_exact, per the velocity source. Kept apart from odom, which is always
         # truth, so the page draws the vehicle where it is while the telemetry
         # check compares the controller against what it was given.
         self.consumed = None

@@ -298,5 +298,17 @@
       <odom_publish_frequency>250</odom_publish_frequency>
       <odom_topic>/model/drone/odometry_truth</odom_topic>
     </plugin>
+
+    <!-- The exact physics state for the controller's truth sources
+         (/drone/truth_exact). The odometry above differentiates the pose
+         through a 10-sample rolling mean; this reads the engine's own link
+         velocities. publish_frequency 0 = every physics step. Source:
+         src/dsim_truth. -->
+    <plugin filename="dsim_truth_publisher"
+            name="dsim_truth::TruthPublisher">
+      <link_name>base_link</link_name>
+      <topic>/drone/truth_exact</topic>
+      <publish_frequency>0</publish_frequency>
+    </plugin>
   </model>
 </sdf>

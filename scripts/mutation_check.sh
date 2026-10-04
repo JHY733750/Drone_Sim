@@ -24,7 +24,7 @@ INC="-I src/dsim_control/include -I /usr/include/eigen3"
 # declared untestable is a hard error, because the alternative is what happened
 # before: a new file was added to the package and not to this line, the build
 # broke, and all 27 mutations were reported "caught" by the same build failure.
-sources_dsim_control="src/mixer.cpp src/se3_controller.cpp src/body_rate_source.cpp"
+sources_dsim_control="src/mixer.cpp src/se3_controller.cpp src/body_rate_source.cpp src/state_mux.cpp"
 untestable_dsim_control="src/trajectory_buffer.cpp"      # needs dsim_msgs headers
 sources_dsim_simctl=""                                   # header-only
 untestable_dsim_simctl=""
@@ -34,6 +34,8 @@ sources_dsim_estimation="src/attitude_filter.cpp src/velocity_filter.cpp"
 untestable_dsim_estimation=""
 sources_dsim_eval=""                                     # header-only geometry
 untestable_dsim_eval=""                                  # (the nodes are *_node.cpp)
+sources_dsim_truth=""                                    # header-only arithmetic
+untestable_dsim_truth="src/truth_publisher.cpp"          # a Gazebo plugin: needs gz-sim
 
 audit_sources() {   # $1 = package
   local pkg="$1" listed found missing=0
@@ -126,6 +128,7 @@ check_baseline dsim_simctl test/test_pacer.cpp    || baseline=BAD
 check_baseline dsim_time   test/test_sim_epoch.cpp || baseline=BAD
 check_baseline dsim_estimation test/test_estimation.cpp || baseline=BAD
 check_baseline dsim_eval   test/test_obstacle.cpp || baseline=BAD
+check_baseline dsim_truth  test/test_truth.cpp    || baseline=BAD
 if [ "$baseline" != "ALL_PASS" ]; then
   # Without this guard every mutation below is "caught" by the same build
   # failure, and the script reports teeth it does not have. That happened the
@@ -1065,6 +1068,113 @@ run_mutation "accel integral gain re-enabled (winds up in every turn)" \
   "include/dsim_estimation/attitude_filter.hpp" \
   "  double ki_accel {0.0};" \
   "  double ki_accel {0.01};"
+
+PKG=dsim_control
+TEST=test/test_control.cpp
+
+# ---------------------------------------------------------------------------
+# State sources. "Truth means truth": a field on truth is the truth input,
+# unprocessed; a field on est is the estimate; one field's choice never leaks
+# into another. Each mutation is a way that promise breaks quietly -- the
+# vehicle still flies, and the run is labelled with a source it did not use.
+# ---------------------------------------------------------------------------
+run_mutation "position always taken from the estimate, whatever was selected" \
+  "src/state_mux.cpp" \
+  "  s.position = pick(sources_.position).position;" \
+  "  s.position = est_.position;"
+
+run_mutation "velocity rotated with the SELECTED attitude, not its own message's" \
+  "src/state_mux.cpp" \
+  "  s.velocity = worldVelocity(pick(sources_.velocity));" \
+  "  OdomSample v = pick(sources_.velocity);
+  v.orientation = pick(sources_.attitude).orientation;
+  s.velocity = worldVelocity(v);"
+
+run_mutation "attitude=truth served the estimated attitude" \
+  "src/state_mux.cpp" \
+  "  s.orientation = pick(sources_.attitude).orientation;" \
+  "  s.orientation = est_.orientation;"
+
+run_mutation "body_rate=truth still flies on the gyro" \
+  "src/state_mux.cpp" \
+  "  s.angular_rate = sources_.body_rate == Source::Truth ? truth_rate_.value() : gyro_.value();" \
+  "  s.angular_rate = gyro_.value();"
+
+run_mutation "truth body rate low-passed like the gyro (truth is not filtered)" \
+  "src/state_mux.cpp" \
+  "  truth_rate_(max_body_rate_rad_s, 0.0)" \
+  "  truth_rate_(max_body_rate_rad_s, gyro_tau_s)"
+
+run_mutation "truth body rate differentiated from the pose (the 626 rad/s bug)" \
+  "src/state_mux.cpp" \
+  "  const double dt = have_truth_ ? (now - last_truth_s_) : 0.0;
+  truth_ = m;" \
+  "  const double dt = have_truth_ ? (now - last_truth_s_) : 0.0;
+  const Eigen::Vector3d naive = (have_truth_ && dt > 0.0) ?
+    Eigen::Vector3d(2.0 * (truth_.orientation.conjugate() * m.orientation.normalized()).vec() / dt) :
+    m.twist_angular;
+  OdomSample mm = m;
+  mm.twist_angular = naive;
+  truth_ = m;
+  truth_rate_.update(mm.twist_angular, dt);
+  return;"
+
+run_mutation "est body rate no longer low-passed" \
+  "src/state_mux.cpp" \
+  "  gyro_(max_body_rate_rad_s, gyro_tau_s)," \
+  "  gyro_(max_body_rate_rad_s, 0.0),"
+
+run_mutation "position=slam accepted although nothing feeds it" \
+  "src/state_mux.cpp" \
+  "  if (s.position == Source::Slam) {" \
+  "  if (false) {"
+
+run_mutation "an unknown source name falls back to est instead of being refused" \
+  "src/state_mux.cpp" \
+  "  throw std::invalid_argument(
+          \"state source '\" + field + \"=\" + name + \"' is not one of est | truth\" +" \
+  "  return Source::Est;
+  throw std::invalid_argument(
+          \"state source '\" + field + \"=\" + name + \"' is not one of est | truth\" +"
+
+run_mutation "a stale estimate goes unnoticed when it feeds only some fields" \
+  "src/state_mux.cpp" \
+  "  if (need_est && (now - last_est_s_) > state_timeout_s) {" \
+  "  if (false) {"
+
+run_mutation "a stale truth stream goes unnoticed" \
+  "src/state_mux.cpp" \
+  "  if (need_truth && (now - last_truth_s_) > state_timeout_s) {" \
+  "  if (false) {"
+
+run_mutation "flying before the estimate has arrived, with velocity=est" \
+  "src/state_mux.cpp" \
+  "(need_est && !have_est_) ||" \
+  "false ||"
+
+run_mutation "the gyro required even when body_rate=truth" \
+  "src/state_mux.cpp" \
+  "  const bool need_gyro = sources_.usesGyro();" \
+  "  const bool need_gyro = true;"
+
+run_mutation "a reset forgets the truth stream but keeps the old estimate" \
+  "src/state_mux.cpp" \
+  "  have_est_ = false;
+  last_truth_s_ = now;" \
+  "  last_truth_s_ = now;"
+
+PKG=dsim_truth
+TEST=test/test_truth.cpp
+
+run_mutation "truth plugin rotates world velocity by R instead of R^T" \
+  "include/dsim_truth/body_twist.hpp" \
+  "  return BodyTwist{q.conjugate() * v_world, q.conjugate() * w_world};" \
+  "  return BodyTwist{q * v_world, q.conjugate() * w_world};"
+
+run_mutation "truth plugin publishes the angular velocity in the world frame" \
+  "include/dsim_truth/body_twist.hpp" \
+  "  return BodyTwist{q.conjugate() * v_world, q.conjugate() * w_world};" \
+  "  return BodyTwist{q.conjugate() * v_world, w_world};"
 
 PKG=dsim_control
 TEST=test/test_control.cpp

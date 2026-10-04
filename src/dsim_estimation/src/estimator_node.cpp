@@ -24,10 +24,10 @@
 //               one plugs in.
 //
 // The output is shaped exactly like /drone/truth -- nav_msgs/Odometry with
-// the twist in the body frame per REP-145 -- so the controller consumes it
-// through a topic remap and nothing in dsim_control changes. That is the
-// point: the controller cannot tell which it is flying on, and the launch
-// argument state:=est|truth decides.
+// the twist in the body frame per REP-145 -- so the controller treats it and
+// /drone/truth_exact identically. Which of the two feeds each of position,
+// velocity and attitude is the controller's choice, field by field
+// (state:=est|truth plus the src_* overrides; dsim_control/state_mux.hpp).
 //
 // Nothing is published until the attitude has been initialised, an IMU
 // sample has been integrated and a truth position is in hand. A controller

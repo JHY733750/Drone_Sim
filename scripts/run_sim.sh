@@ -6,6 +6,7 @@
 #   RADIUS=2.0 PERIOD=6 scripts/run_sim.sh
 #   WORLD=fence3d PLAN=plans/fence3d_seed.json scripts/run_sim.sh   # fly a plan
 #   WORLD=loiter PLAN=plans/loiter_N8_seg16.json STATE=truth scripts/run_sim.sh
+#   SRC_ATTITUDE=truth SRC_BODY_RATE=truth scripts/run_sim.sh   # mix per field
 #
 # PERIOD is the knob that decides whether there is anything to watch. A circle
 # needs bank = atan(4*pi^2*r / (T^2*g)), so the old 12 s lap on a 1 m circle
@@ -47,6 +48,15 @@ PLAN="${PLAN:-}"
 # only below 3 m. The viewer's dropdown works this out per run from the plan's
 # own altitude; from here you have to say. See docs/PLANNER.md.
 STATE="${STATE:-est}"
+# Per-field overrides of STATE, each est | truth (SRC_POSITION also takes
+# slam, which the controller refuses until it is wired). Empty follows STATE.
+# SRC_ATTITUDE=truth SRC_BODY_RATE=truth flies the rotational loop on exact
+# state while position and velocity stay on the estimate.
+SRC_ARGS=""
+[ -n "${SRC_POSITION:-}" ]  && SRC_ARGS="$SRC_ARGS src_position:=$SRC_POSITION"
+[ -n "${SRC_VELOCITY:-}" ]  && SRC_ARGS="$SRC_ARGS src_velocity:=$SRC_VELOCITY"
+[ -n "${SRC_ATTITUDE:-}" ]  && SRC_ARGS="$SRC_ARGS src_attitude:=$SRC_ATTITUDE"
+[ -n "${SRC_BODY_RATE:-}" ] && SRC_ARGS="$SRC_ARGS src_body_rate:=$SRC_BODY_RATE"
 WEB_PORT="${WEB_PORT:-8080}"
 # Interface the viewer binds to. Set it to your Tailscale IP to keep the port
 # off the local LAN.
@@ -118,7 +128,7 @@ nohup $COMPOSE exec -T sim bash -lc \
   "cd /ws && exec ros2 launch dsim_bringup sim.launch.py \
      world:=$WORLD reference:=$REFERENCE radius:=$RADIUS altitude:=$ALTITUDE \
      period:=$PERIOD $PLAN_ARG \
-     gui:=$GUI viz:=true state:=$STATE" \
+     gui:=$GUI viz:=true state:=$STATE $SRC_ARGS" \
   >"$LOG" 2>&1 &
 echo $! > "$PIDFILE"
 
