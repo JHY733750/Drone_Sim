@@ -120,9 +120,14 @@ make plan  PLAN=plans/fence3d_N8_seg2.json     # headless, graded against the pl
 make viz   WORLD=fence3d PLAN=plans/fence3d_N8_seg2.json   # watch it, and re-solve from the page
 ```
 
-Seven scenarios come straight from the planner (`original`, `curve`,
-`diverse`, `wall`, `fence3d`, `door3d`, `loiter`) — `scripts/solve_plan.py
---list` shows them. A fence3d solve takes 0.20 s.
+Six scenarios come straight from the planner (`original`, `curve`,
+`diverse`, `wall`, `fence3d`, `door3d`) and one is the sim's own:
+`loiter_sim`, the planner's line-of-sight demo (`loiter`) redesigned at the
+simulator's size — corridor at 2.25 m inside the optical flow's band, 12 m
+long, solved with the arrival time free — rather than its 200 m scene shrunk
+into it. `import_scenarios.py --check` prints why the planner's `loiter` is
+not imported, and `scripts/loiter_pair.py` measures the design's three claims.
+`scripts/solve_plan.py --list` shows them all. A fence3d solve takes 0.20 s.
 
 Once the viewer is open you do not need the command line to change scenario:
 the dropdown restarts the simulator with whichever run you pick, including the
@@ -130,7 +135,8 @@ planner-free `hover` and `circle`. It takes about four seconds and the page
 stays up throughout, because the viewer is a launch of its own — see
 [docs/VIEWER.md](docs/VIEWER.md#two-launches-and-why).
 `plans/<name>_seed.json` is the optimiser's straight-line initial guess and on
-six of the seven goes THROUGH something on purpose — its file says what and
+six of the seven goes THROUGH something on purpose (`loiter_sim`'s only loses
+the link) — its file says what and
 when, and the referee has to agree.
 
 ## Layout
@@ -138,6 +144,8 @@ when, and the referee has to agree.
 ```
 scripts/gen_assets.py       ONE source for the vehicle + worlds. Edit PARAMS here.
 scripts/import_scenarios.py generated scenarios/ from the planner's SCENARIO_MAP
+scripts/sim_scenarios.py    scenarios authored in the sim (loiter_sim), and why loiter is not imported
+scripts/loiter_pair.py      loiter_sim's claims, measured: certifies, baseline loses link, timing saves it
 scenarios/*.json            generated — obstacles as control points in (x, y, z, t)
 plans/*.json                (x, y, z, t) control points that solve one; the *_seed is generated
 config/drone.yaml           generated — what the controller assumes

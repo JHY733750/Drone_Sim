@@ -16,7 +16,8 @@ PLAN="${PLAN:-plans/fence3d_seed.json}"
 # est is the default everywhere else, and it is the honest one: the controller
 # flies on what the sensors can work out. A plan that climbs above the optical
 # flow's height band has no velocity aiding, so it needs truth -- the grader
-# says so explicitly when it sees one, and `loiter` is the shipped example.
+# says so explicitly when it sees one. (No shipped scenario does any more:
+# the planner's 62.5 m `loiter` was replaced by loiter_sim at 2.25 m.)
 STATE="${STATE:-est}"
 # Per-field overrides of STATE, each est | truth (SRC_POSITION also takes
 # slam, which the controller refuses until it is wired). Empty follows STATE.

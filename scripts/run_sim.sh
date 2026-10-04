@@ -5,7 +5,7 @@
 #   WORLD=empty REFERENCE=lemniscate scripts/run_sim.sh
 #   RADIUS=2.0 PERIOD=6 scripts/run_sim.sh
 #   WORLD=fence3d PLAN=plans/fence3d_seed.json scripts/run_sim.sh   # fly a plan
-#   WORLD=loiter PLAN=plans/loiter_N8_seg16.json STATE=truth scripts/run_sim.sh
+#   WORLD=loiter_sim PLAN=plans/loiter_sim_N8_seg8.json scripts/run_sim.sh
 #   SRC_ATTITUDE=truth SRC_BODY_RATE=truth scripts/run_sim.sh   # mix per field
 #
 # PERIOD is the knob that decides whether there is anything to watch. A circle
@@ -44,8 +44,9 @@ GUI="${GUI:-false}"
 # refuses anything else.
 PLAN="${PLAN:-}"
 # What the controller flies on: est (the sensor-based estimate) or truth.
-# loiter needs truth -- it flies at 62.5 m and the optical flow aids velocity
-# only below 3 m. The viewer's dropdown works this out per run from the plan's
+# A plan above 3 m needs truth -- the optical flow aids velocity only below
+# that (the planner's 62.5 m loiter did; loiter_sim flies at 2.25 m). The
+# viewer's dropdown works this out per run from the plan's
 # own altitude; from here you have to say. See docs/PLANNER.md.
 STATE="${STATE:-est}"
 # Per-field overrides of STATE, each est | truth (SRC_POSITION also takes

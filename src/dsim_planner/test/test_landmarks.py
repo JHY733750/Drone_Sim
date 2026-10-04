@@ -170,12 +170,12 @@ def test_a_landmark_in_an_obstacle_sweep_fails_the_gate():
 
 
 def test_a_landmark_across_a_sight_line_fails_the_gate():
-    sc = frames.scenario_to_sim(json.loads((ROOT / "scenarios" / "loiter.json").read_text()))
+    sc = frames.scenario_to_sim(json.loads((ROOT / "scenarios" / "loiter_sim.json").read_text()))
     st = sc["stations"][0]
-    seed = json.loads((ROOT / "plans" / "loiter_seed.json").read_text())["control_points"]
+    seed = json.loads((ROOT / "plans" / "loiter_sim_seed.json").read_text())["control_points"]
     m = L.bezier_points(seed, 2)[1]
     p = [st[i] + 0.4 * (m[i] - st[i]) for i in range(3)]
-    fails = G.check("loiter", extra={"name": "PLANT", "type": "sphere", "center": p,
+    fails = G.check("loiter_sim", extra={"name": "PLANT", "type": "sphere", "center": p,
                                      "radius": 0.1}, quiet=True)
     assert any(f.startswith("PLANT") and "sight line" in f for f in fails), fails
 

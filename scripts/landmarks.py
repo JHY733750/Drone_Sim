@@ -17,7 +17,7 @@ what a run means, so they keep out of three regions:
                         path over the whole window, at its radius; a column
                         at every height -- plus OBSTACLE_MARGIN_M.
   sight lines           every segment from a station to any point of any plan,
-                        plus SIGHT_MARGIN_M. Only loiter has a station.
+                        plus SIGHT_MARGIN_M. Only loiter_sim has a station.
 
 The generator cannot see solved plans -- they are gitignored outputs, and a
 generated file has to come out the same on every machine for `gen_assets.py
@@ -67,11 +67,13 @@ SEPARATION_M = 0.6
 #: How far (sim metres) a solved plan may stray from the seed before the
 #: generator's guarantee stops covering it. Measured max deviation of the
 #: plans solved 2026-10-01, rounded up with room: curve 0.86 (uncertified),
-#: diverse 2.38, door3d 0.05, fence3d 1.70 (the climb), loiter 0.003 at
-#: s = 0.04, original 1.72, wall 0.39.
+#: diverse 2.38, door3d 0.05, fence3d 1.70 (the climb), original 1.72,
+#: wall 0.39; loiter_sim (2026-10-05) 0.19 at N8_seg8, 0.23 at N8_seg16 --
+#: the corridor is only 0.2 m wide and the band 0.3 m deep, so a plan that
+#: certifies cannot stray much further than that.
 RESERVE_M = {
     "curve": 1.5, "diverse": 3.0, "door3d": 1.0, "fence3d": 2.0,
-    "loiter": 0.5, "original": 2.0, "wall": 1.0,
+    "loiter_sim": 0.5, "original": 2.0, "wall": 1.0,
 }
 
 #: The camera, from the task's D435 figures. Body +x, yaw 0 in flight.

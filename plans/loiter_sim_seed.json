@@ -1,0 +1,27 @@
+{
+ "_generated_by": "scripts/gen_assets.py -- the straight-line seed, not a solution",
+ "scenario": "loiter_sim",
+ "frame": {
+  "scenario": "loiter_sim",
+  "version": 1,
+  "scale": 1.0,
+  "centre": [
+   0.0,
+   0.0,
+   0.0
+  ]
+ },
+ "solver": "seed",
+ "expect": {},
+ "control_points": [
+  [-6.0, 1.35, 2.25, 0.0],
+  [-4.5, 1.35, 2.25, 2.0],
+  [-3.0, 1.35, 2.25, 4.0],
+  [-1.5, 1.35, 2.25, 6.0],
+  [0.0, 1.35, 2.25, 8.0],
+  [1.5, 1.35, 2.25, 10.0],
+  [3.0, 1.35, 2.25, 12.0],
+  [4.5, 1.35, 2.25, 14.0],
+  [6.0, 1.35, 2.25, 16.0]
+ ]
+}

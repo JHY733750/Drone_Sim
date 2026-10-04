@@ -34,6 +34,12 @@ SIM units: --inflate and --v-max are converted to planner units before the
 solve (divided by s), and the certificate is converted back (times s). For
 s = 1 every conversion is the identity.
 
+A scenario may carry the flags it is MEANT to be solved with, under "solve"
+(only the sim-native ones do: scripts/sim_scenarios.py). They are defaults --
+the command line wins -- and the plan records which were used and where each
+came from. loiter_sim needs them: its design is the planner's free-arrival
+one, and solved with a pinned arrival it never certifies a run that matters.
+
 Nothing here is a ROS node. The plan is a file; dsim_planner's bridge reads it.
 """
 import argparse
@@ -214,7 +220,16 @@ def main(argv=None):
                          "pass 0 to solve for a point and see the difference.")
     ap.add_argument("--min-dt", type=float, default=0.1)
     ap.add_argument("--max-iter", type=int, default=200)
-    ap.add_argument("--time-weight", type=float, default=0.0)
+    ap.add_argument("--time-weight", type=float, default=None,
+                    help="price on the arrival time (default: the scenario's "
+                         "solve.time_weight, else 0)")
+    ap.add_argument("--free-arrival", action=argparse.BooleanOptionalAction, default=None,
+                    help="let the solver choose the arrival time (needs --v-max and a "
+                         "--time-weight > 0; default: the scenario's "
+                         "solve.free_arrival_time, else pinned at T)")
+    ap.add_argument("--elastic-weight", type=float, default=None,
+                    help="STARTING elastic penalty weight (default: the scenario's "
+                         "solve.elastic_weight, else the solver's own)")
     ap.add_argument("--out", default=None, help="output path (default plans/<name>_N<N>_seg<s>.json)")
     args = ap.parse_args(argv)
 
@@ -249,9 +264,27 @@ def main(argv=None):
     # The solver's own units. A sim length L is L/s planner metres, and at
     # fixed time a sim speed v is v/s planner metres per second.
     grow_planner = frames.length_to_planner(grow, frame)
-    kw = dict(min_dt=args.min_dt, max_iter=args.max_iter, time_weight=args.time_weight)
-    if args.v_max is not None:
-        kw["v_max"] = frames.length_to_planner(args.v_max, frame)
+    # Each flag: the command line, else the scenario's own "solve" record,
+    # else the solver's default. Recorded with its source in the plan.
+    preset = sc.get("solve") or {}
+    flags, source = {}, {}
+    for key, cli, fallback in (("v_max", args.v_max, None),
+                               ("time_weight", args.time_weight, 0.0),
+                               ("free_arrival_time", args.free_arrival, False),
+                               ("elastic_weight", args.elastic_weight, None)):
+        if cli is not None:
+            flags[key], source[key] = cli, "command line"
+        elif key in preset:
+            flags[key], source[key] = preset[key], "scenario"
+        else:
+            flags[key], source[key] = fallback, "default"
+    kw = dict(min_dt=args.min_dt, max_iter=args.max_iter,
+              time_weight=float(flags["time_weight"]),
+              free_arrival_time=bool(flags["free_arrival_time"]))
+    if flags["v_max"] is not None:
+        kw["v_max"] = frames.length_to_planner(float(flags["v_max"]), frame)
+    if flags["elastic_weight"] is not None:
+        kw["elastic_weight"] = float(flags["elastic_weight"])
 
     print(f"solving {args.scenario} ({sc['spatial_dim']}D+t): "
           f"{len(scenario['obstacles'])} obstacles, "
@@ -264,6 +297,11 @@ def main(argv=None):
         print(f"  frame: {frames.describe(frame)}; the solver sees the obstacles grown by "
               f"{grow_planner:.3f} planner m"
               + (f" and a speed cap of {kw['v_max']:.3f} planner m/s" if "v_max" in kw else ""))
+    shown = {k: v for k, v in flags.items() if v is not None and source[k] != "default"}
+    if shown:
+        print("  solve flags: " + ", ".join(f"{k}={v:g} ({source[k]})" if not isinstance(v, bool)
+                                           else f"{k}={v} ({source[k]})"
+                                           for k, v in shown.items()))
     out, elapsed = solve(inflate(scenario, grow_planner), configs, **kw)
     print(f"  {elapsed:.2f} s for {len(configs)} config(s)")
 
@@ -334,7 +372,8 @@ def main(argv=None):
     doc = {
         "_generated_by": f"scripts/solve_plan.py --scenario {args.scenario} "
                          f"-N {r['N']} --n-seg {r['n_seg']}"
-                         + (f" --v-max {args.v_max}" if args.v_max is not None else ""),
+                         + (f" --v-max {args.v_max}" if args.v_max is not None else "")
+                         + (" (+ the scenario's solve flags)" if preset else ""),
         "scenario": args.scenario,
         # Which transform the control points are in. The launch and the bridge
         # refuse the plan if this is not the scenario's current frame.
@@ -350,6 +389,10 @@ def main(argv=None):
         # What the solver itself was given and returned, in planner units.
         "solver_units": {"scale": scale, "inflated_by": grow_planner,
                          "v_max": kw.get("v_max"),
+                         "free_arrival_time": kw["free_arrival_time"],
+                         "time_weight": kw["time_weight"],
+                         "elastic_weight_start": kw.get("elastic_weight"),
+                         "flag_source": source,
                          "certified_clearance": r["min_clearance"]},
         # What the referee is expected to measure on the real obstacles with
         # this vehicle. scripts/check_planner.py holds the live run to it.
