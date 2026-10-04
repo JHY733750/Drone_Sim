@@ -301,6 +301,12 @@ def main(plan_file, url):
     sys.path.insert(0, "src/dsim_planner")
     from dsim_planner import spacetime
     P = spacetime.validate(plan["control_points"])
+    # Where the PLAN ends, which is not always the scenario's horizon: a plan
+    # solved with a free arrival time (loiter_sim) arrives early and then the
+    # controller holds the goal. Tracking and feedforward are graded over the
+    # plan; line of sight and clearance over the whole horizon, because the
+    # obstacles keep moving after the vehicle has arrived.
+    t_arrive = min(T, float(P[-1][3]))
 
     snap = fetch(url)
     if not snap.get("clearance"):
@@ -377,7 +383,7 @@ def main(plan_file, url):
               "point is not where the scenario says")
 
     # ---- run the window, sampling -----------------------------------------
-    cruise_from = max(CRUISE_MIN_S, CRUISE_FROM_FRAC * T)
+    cruise_from = max(CRUISE_MIN_S, CRUISE_FROM_FRAC * t_arrive)
     max_err = 0.0
     max_err_cruise = 0.0
     max_err_stop = 0.0          # after the plan ends: the vehicle is still moving
@@ -395,20 +401,22 @@ def main(plan_file, url):
         t = scenario_time(snap)
         if t > T + 1.5:
             break
-        if t != last_t and T < t <= T + 1.5:
+        if t != last_t and t_arrive < t <= t_arrive + 1.5:
             # Past the horizon the controller holds the final point with zero
             # velocity while the vehicle is still moving at whatever speed the
             # plan ended at -- the closing half of the same formulation gap as
             # the standing start. Measured, reported, not gated: it is the
             # planner's boundary condition, not the simulator's tracking.
-            last_t = t
+            # (last_t is left to the branch below, which still has to take
+            # this instant's line-of-sight sample.)
             max_err_stop = max(max_err_stop, (snap.get("status") or {})
                                .get("tracking_error_m", 0.0))
         if t != last_t and 0.0 <= t <= T:
             last_t = t
             st = snap.get("status") or {}
-            max_err = max(max_err, st.get("tracking_error_m", 0.0))
-            if t >= cruise_from:
+            if t <= t_arrive:
+                max_err = max(max_err, st.get("tracking_error_m", 0.0))
+            if cruise_from <= t <= t_arrive:
                 max_err_cruise = max(max_err_cruise, st.get("tracking_error_m", 0.0))
             # The referee's OWN sample, not the viewer's pose: the margin was
             # measured from that position at that time, and anything else
@@ -421,7 +429,7 @@ def main(plan_file, url):
                                     cl_now["sample_position"],
                                     cl_now.get("los_margin_m")))
             ctl = snap.get("control")
-            if ctl and 1.0 <= t <= T - 1.0:
+            if ctl and 1.0 <= t <= t_arrive - 1.0:
                 v = ctl["velocity_world"]
                 e = ctl["velocity_error"]
                 v_ref = math.dist([v[i] - e[i] for i in range(3)], [0, 0, 0])
@@ -590,11 +598,11 @@ def main(plan_file, url):
     cruise_limit = max(CRUISE_MIN_M, CRUISE_LAG_S * v_top)
     if max_err_cruise <= cruise_limit:
         c.ok("tracking in the cruise", f"max error {max_err_cruise * 100:.1f} cm over "
-             f"t={cruise_from:.1f}..{T:.0f} s (limit {cruise_limit * 100:.1f} cm = "
+             f"t={cruise_from:.1f}..{t_arrive:.1f} s (limit {cruise_limit * 100:.1f} cm = "
              f"{CRUISE_LAG_S * 1000:.0f} ms of lag at the plan's {v_top:.2f} m/s)")
     else:
         c.bad("tracking in the cruise", f"max error {max_err_cruise * 100:.1f} cm over "
-              f"t={cruise_from:.1f}..{T:.0f} s against {cruise_limit * 100:.1f} cm",
+              f"t={cruise_from:.1f}..{t_arrive:.1f} s against {cruise_limit * 100:.1f} cm",
               "acceleration feedforward missing or wrong on a plan that turns, or a "
               "loop that never settles after the start")
     v_end = ((demands or {}).get("end_speed_mps")
@@ -602,7 +610,7 @@ def main(plan_file, url):
              else math.dist(spacetime.sample_at_time(P, P[-1][3])[1], [0, 0, 0]))
     if v_end > 0.05:
         print(f"  note  the plan ends at {v_end:.2f} m/s and the controller then holds "
-              f"the final point: {max_err_stop * 100:.1f} cm of overshoot past t={T:.0f} s. "
+              f"the final point: {max_err_stop * 100:.1f} cm of overshoot past t={t_arrive:.1f} s. "
               f"That is the planner's boundary condition, not tracking.")
 
     # ---- 5. the hits ----------------------------------------------------------

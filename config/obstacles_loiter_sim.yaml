@@ -6,7 +6,7 @@
 /**:
   ros__parameters:
     scenario.name: "loiter_sim"
-    scenario.start_s: 5.0
+    scenario.start_s: 8.0
     scenario.duration_s: 16.0
     obstacles:
       names: ["orbit_q1", "orbit_q2", "orbit_q3", "orbit_q4"]

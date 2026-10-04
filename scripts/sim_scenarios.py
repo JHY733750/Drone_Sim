@@ -145,6 +145,11 @@ def scenario_loiter_sim(phase_deg: float | None = None) -> dict:
         ],
         "trust_radius": 0.18,
         "T": T,
+        # Sim seconds before scenario t = 0. Longer than the imported
+        # scenarios' 5 s: the vehicle drops to the pad while the estimator
+        # starts, and the climb back to 2.25 m overshoots -- measured 2.39 m at
+        # sim 5.4 s, 17 cm off the start point when the clock started.
+        "start_s": 8.0,
     }
 
 

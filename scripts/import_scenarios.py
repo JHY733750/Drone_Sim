@@ -116,7 +116,7 @@ def scenario_doc(name, factory, configs, native=None):
         # this scene. `make solve SOLVE_ARGS=--sweep` walks them.
         "configs": [[int(a), int(b)] for a, b in configs],
         "obstacles": obstacles,
-        "sim": {"start_s": START_S, "spawn": lift(sc["start"])[:3]},
+        "sim": {"start_s": float(sc.get("start_s", START_S)), "spawn": lift(sc["start"])[:3]},
     }
     if spatial == 2:
         doc["lift_z"] = LIFT_Z
