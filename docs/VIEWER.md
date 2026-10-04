@@ -385,7 +385,7 @@ BIND=100.64.0.1 bash scripts/run_sim.sh      # the same thing, both launches
 
 ## Line of sight
 
-For a scenario with stations (only `loiter` today) the viewer draws the station
+For a scenario with stations (only `loiter_sim` today) the viewer draws the station
 as a small pad-and-mast and a line from it to the vehicle: green while the
 station can see the drone, red while an obstacle is between them. The HUD gains
 two rows — the current margin with the obstacle responsible, and the last time
@@ -440,9 +440,9 @@ Two things the catalogue works out rather than being told:
   Seeds are still flyable from the command line.
 * **Which state source.** A plan whose control points go above the optical
   flow's `max_height_m` is launched `state:=truth`, and the dropdown says why.
-  At full scale `loiter` flew at 62.5 m and measured 48 m of error on the
-  estimate; it is now scaled to 2.5 m (docs/PLANNER.md), so no scenario
-  currently triggers this.
+  The planner's `loiter` flew at 62.5 m and measured 48 m of error on the
+  estimate; the sim now flies `loiter_sim` at 2.25 m instead (docs/PLANNER.md),
+  so no scenario currently triggers this.
 
 While a run is coming up the line under the dropdown counts the seconds. If the
 launch exits, or produces no telemetry inside 90 s, it says so and shows the

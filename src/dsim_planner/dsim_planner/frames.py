@@ -1,8 +1,8 @@
 """Where each scenario sits in the simulator's world. One table, one map.
 
-The planner's seven scenarios all live in roughly 0..10 m, a quarter of the
-world around the origin, and `loiter` is a 200 m corridor at 62.5 m. The sim
-places each one with an explicit SIMILARITY transform,
+The planner's six imported scenarios all live in roughly 0..10 m, a quarter
+of the world around the origin. The sim places each one with an explicit
+SIMILARITY transform,
 
     p_sim = s * (p_planner - c),        c = (cx, cy, 0),    t_sim = t_planner
 
@@ -24,25 +24,29 @@ but not z would turn every sphere into an ellipsoid, which nothing here can
 score -- so there is no separate z scale; z scales with s about the ground
 (cz = 0), and for s = 1 it is simply untouched.
 
-c is the centre of the scenario's horizontal bounding box: start, end and
-every obstacle control point (the control polygon contains the curve, so this
-box contains every obstacle path). Rounded to the centimetre and written into
-the table below as a literal, because the table is the claim; gen_assets.py
---check recomputes the definition and fails if a planner change has moved it.
+For an IMPORTED scenario, c is the centre of its horizontal bounding box:
+start, end and every obstacle control point (the control polygon contains the
+curve, so this box contains every obstacle path). Rounded to the centimetre
+and written into the table below as a literal, because the table is the claim;
+gen_assets.py --check recomputes the definition and fails if a planner change
+has moved it.
 
-s is 1 except where a scenario does not fit a depth camera's ~10 m world:
+A SIM-NATIVE scenario (NATIVE below) is authored in this repo, in sim metres,
+by scripts/sim_scenarios.py. Its frame is the identity, s = 1 and c = 0, BY
+CONSTRUCTION rather than by measurement: its numbers are already where the sim
+flies them, and its origin is meaningful (loiter_sim's ground station stands
+there), so re-centring it on a bounding box would move the station off the
+origin for nothing. check_table_centre() holds both directions: a native
+scenario must declare itself native in its file AND be listed here with
+exactly (1, (0, 0)); an imported one may do neither.
 
-  loiter   s = 0.04. The corridor goes from 200 m to 8 m, the altitude from
-           62.5 m to 2.5 m (coord_bounds z 60..65 -> 2.4..2.6 m), the orbiting
-           bodies from radius 6 m at 50 m up to 0.24 m at 2.0 m, the station
-           stays on the ground. 2.5 m is inside the optical flow's 0.1..3.0 m
-           band and the rangefinder's 4 m, so state:=est has velocity aiding
-           for the first time on this scenario; 0.05 would put the cruise at
-           3.1 m, just outside it. The price: at fixed time every speed and
-           acceleration scales by s -- the 3.4 m/s cruise becomes 0.14 m/s --
-           and a plan solved for the 0.3 m vehicle at s = 1 is solved for a
-           0.012 m one here, so loiter plans must be RE-SOLVED with the
-           obstacles grown by 0.3/s planner metres (solve_plan.py does this).
+  loiter_sim   replaces the planner's 200 m `loiter`, which this table used to
+               scale by s = 0.04. That put the corridor in the optical flow's
+               band, but the 0.3 m vehicle became 7.5 planner metres, so the
+               bodies had to be grown by that much before solving; grown, they
+               reached into the altitude band and the run lost its occlusion
+               certificate at N8_seg16. Redesigned at the sim's own size
+               instead: see scripts/sim_scenarios.py.
 
 Everything that maps a coordinate between the frames calls this module. There
 is no other copy of s or c anywhere.
@@ -61,10 +65,16 @@ TABLE = {
     "diverse":  (1.0,  (4.75, 4.75)),
     "door3d":   (1.0,  (4.25, 5.00)),
     "fence3d":  (1.0,  (5.00, 5.00)),
-    "loiter":   (0.04, (0.00, 1.88)),
+    # Sim-native (NATIVE below): the identity, by construction.
+    "loiter_sim": (1.0, (0.00, 0.00)),
     "original": (1.0,  (4.50, 4.75)),
     "wall":     (1.0,  (4.75, 5.00)),
 }
+
+#: Scenarios AUTHORED in the sim (scripts/sim_scenarios.py), in sim metres.
+#: Their frame is the identity; see the module docstring. Their files carry
+#: "native": true, and check_table_centre() holds the two together.
+NATIVE = frozenset({"loiter_sim"})
 
 #: How far a table centre may sit from the bounding-box centre it claims to
 #: be, in planner metres: half a centimetre, i.e. "rounded to the cm".
@@ -157,13 +167,37 @@ def bbox_centre(scenario) -> tuple:
 
 
 def check_table_centre(scenario) -> None:
-    """Raise if the table's c is not the bounding-box centre, rounded to cm."""
-    frame = frame_for(scenario["name"])
+    """Raise if the table's c is not the bounding-box centre, rounded to cm.
+
+    For a sim-native scenario there is no bounding-box definition to hold it
+    to: raise unless the file declares itself native, the name is in NATIVE
+    and the table entry is exactly the identity. Each half alone is refused,
+    so a planner scenario cannot be waved through by listing it in NATIVE and
+    a hand-edited file cannot be waved through by writing "native" into it.
+    """
+    name = scenario["name"]
+    frame = frame_for(name)
+    declared = bool(scenario.get("native", False))
+    if declared or name in NATIVE:
+        if not declared:
+            raise FrameError(
+                f"{name}: listed in frames.NATIVE but its file does not declare "
+                f'"native": true -- it is not the sim-authored scenario NATIVE means')
+        if name not in NATIVE:
+            raise FrameError(
+                f'{name}: file declares "native": true but frames.NATIVE does not '
+                f"list it; a sim-native frame is the identity and must be claimed here")
+        if frame["scale"] != 1.0 or frame["centre"] != [0.0, 0.0, 0.0]:
+            raise FrameError(
+                f"{name}: a sim-native scenario is authored in sim metres, so its "
+                f"frame must be the identity (s = 1, c = 0); the table says "
+                f"{describe(frame)}")
+        return
     want = bbox_centre(scenario)
     got = frame["centre"][:2]
     if any(abs(a - b) > CENTRE_ROUNDING_M for a, b in zip(got, want)):
         raise FrameError(
-            f"{scenario['name']}: frames.TABLE centre {got} is not the bounding-box "
+            f"{name}: frames.TABLE centre {got} is not the bounding-box "
             f"centre ({want[0]:.4f}, {want[1]:.4f}) rounded to the cm -- the planner's "
             f"scenario has moved. Update TABLE, regenerate, and re-solve its plans.")
 
@@ -175,12 +209,14 @@ def scenario_to_sim(scenario) -> dict:
     of a 2D scenario, the obstacles and the stations. The planner-only keys
     (coord_bounds, trust_radius, init_curve, configs) are in planner metres and
     mean something only to the solver, which is handed the planner-frame file;
-    they are dropped here so nothing in the sim can misread them.
+    they are dropped here so nothing in the sim can misread them. So are a
+    sim-native scenario's "native" marker and "solve" flags, which are the
+    frame table's and the solver's business respectively.
     """
     frame = frame_for(scenario["name"])
     out = {k: v for k, v in scenario.items()
            if k not in ("coord_bounds", "trust_radius", "init_curve", "configs",
-                        "_generated_by")}
+                        "_generated_by", "native", "solve")}
     out["frame"] = frame
     out["start"] = to_sim(scenario["start"], frame)
     out["end"] = to_sim(scenario["end"], frame)

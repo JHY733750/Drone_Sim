@@ -2,7 +2,7 @@
 """Gate: no SLAM landmark interferes with any scenario's flight.
 
     python3 scripts/check_landmarks.py                 # every scenario
-    python3 scripts/check_landmarks.py wall loiter     # some
+    python3 scripts/check_landmarks.py wall loiter_sim # some
     python3 scripts/check_landmarks.py --self-test     # prove it can fail
 
 For each config/landmarks_<scenario>.yaml, against EVERY plan for that
@@ -138,14 +138,14 @@ def self_test():
     cases.append(("wall", "box on the wall's bottom column, far from the path",
                   {"name": "PLANT", "type": "box", "center": [w0[0], w0[1], 3.5],
                    "size": [0.3, 0.3, 0.3], "yaw": 0.4}, "obstacle"))
-    # Across loiter's sight lines and nowhere near the path: halfway up the
+    # Across loiter_sim's sight lines and nowhere near the path: 40% up the
     # segment from the station to the seed's midpoint.
-    sc = frames.scenario_to_sim(json.loads((ROOT / "scenarios" / "loiter.json").read_text()))
+    sc = frames.scenario_to_sim(json.loads((ROOT / "scenarios" / "loiter_sim.json").read_text()))
     st = sc["stations"][0]
-    seed = json.loads((ROOT / "plans" / "loiter_seed.json").read_text())["control_points"]
+    seed = json.loads((ROOT / "plans" / "loiter_sim_seed.json").read_text())["control_points"]
     m = L.bezier_points(seed, 2)[1]
     p = [st[i] + 0.4 * (m[i] - st[i]) for i in range(3)]
-    cases.append(("loiter", "cylinder 40% of the way up a sight line",
+    cases.append(("loiter_sim", "cylinder 40% of the way up a sight line",
                   {"name": "PLANT", "type": "cylinder", "center": p, "radius": 0.1,
                    "height": 0.2}, "sight line"))
     # Below ground.

@@ -1608,7 +1608,7 @@ run_launcher_mutation "the seed plan preferred over the solved one" \
   "        solved = sorted(f for f, _ in plans if not f.endswith(\"_seed.json\"))" \
   "        solved = sorted(f for f, _ in plans if f.endswith(\"_seed.json\"))"
 
-run_launcher_mutation "the sensing envelope ignored, so loiter flies on the estimate" \
+run_launcher_mutation "the sensing envelope ignored, so a 62.5 m plan flies on the estimate" \
   "            if top is not None and top > ceiling:" \
   "            if False:"
 

@@ -5,7 +5,7 @@ How a plan from [banana99ou/bezier-trajectory](https://github.com/banana99ou/bez
 scenario it was solved in, and what a run proves.
 
 ```
-the planner's SCENARIO_MAP
+the planner's SCENARIO_MAP  +  scripts/sim_scenarios.py (the sim's own: loiter_sim)
          │  scripts/import_scenarios.py          (--check catches drift)
          ▼
 scenarios/<name>.json  ──────────────┬──> worlds/<name>.sdf             (ground, light, the vehicle at `start`)
@@ -31,7 +31,7 @@ Nothing is transcribed anywhere on that path. `import_scenarios.py --check`
 fails if the planner's scenarios have moved, and `gen_assets.py --check` fails
 if anything downstream has.
 
-## The seven scenarios
+## The seven scenarios (six imported, one the sim's own)
 
 ```bash
 python3 scripts/solve_plan.py --list     # inside the container
@@ -45,7 +45,7 @@ python3 scripts/solve_plan.py --list     # inside the container
 | `wall` | 2D+t | a wall that **stands until t=5 and is then gone** |
 | `fence3d` | 3D+t | a moving fence; the demonstrated behaviour is the climb |
 | `door3d` | 3D+t | a doorway in time; the demonstrated behaviour is **waiting** |
-| `loiter` | 3D+t | 200 m in the planner, flown at **s = 0.04** (8 m, 2.5 m up), T=80 s, four orbiting bodies **and a station** |
+| `loiter_sim` | 3D+t | **sim-native** (not imported): the planner's `loiter` redesigned at sim size -- 12 m corridor at 2.25 m, T=16 s, four orbit pieces **and a station**. See [below](#loiter_sim-the-planners-loiter-redesigned-for-the-sim) |
 
 Four are planned in **two** spatial dimensions plus time. They are solved that
 way and the resulting curve is flown at 1.5 m; lifting them into 3D would hand
@@ -73,10 +73,10 @@ clearance analytically and a contact solver would only add a second,
 differently shaped opinion. They are now not Gazebo bodies at all, because
 nothing a rigid body can do expresses what they are:
 
-* two scenarios move theirs along **cubics** (`curve`, `loiter`), not straight
+* two scenarios move theirs along **cubics** (`curve`, `loiter_sim`), not straight
   lines;
 * three switch obstacles **off partway through** (`wall` at t=5, `door3d` at
-  t=5, `loiter`'s four bodies in sequence). Outside its window an obstacle
+  t=5, `loiter_sim`'s four orbit pieces in sequence). Outside its window an obstacle
   does not exist. It is not far away and it is not parked at an endpoint: the
   planner solves a problem in which the thing is absent, and waiting for it to
   go is the behaviour `wall` and `door3d` demonstrate.
@@ -95,8 +95,9 @@ agreement was exactly 0.0 when both sides read identical numbers; since the
 frames change (below) the planner is evaluated on its own coordinates and its
 ANSWER mapped, so the comparison now also tests the map. Offline (the
 referee's obstacle.hpp on the generated yaml, check_planner's own comparison
-code): <= 2.7e-15 m for the s = 1 scenarios, 3.4e-10 m for loiter (the
-yaml's 9-decimal rounding of 0.04 x), against a 1e-6 bound; the
+code): <= 2.7e-15 m for the s = 1 scenarios, 3.4e-10 m for the planner's
+loiter when it was flown at s = 0.04 (the yaml's 9-decimal rounding of 0.04 x),
+against a 1e-6 bound; the
 pre-frames yaml reads 6.5..56 m. Not yet re-measured on a live run.
 
 ## The scenario clock
@@ -112,21 +113,92 @@ begun -- the fence swept through the pad while the vehicle sat on it.
 
 ## Where a scenario sits
 
-`scenarios/*.json` are the planner's numbers, verbatim. Everything the sim
-flies, scores or draws is in the SIM frame, `p_sim = s * (p - c)`, `t`
-unchanged, with one table and one map in
-`src/dsim_planner/dsim_planner/frames.py`. `c` is the centre of the
-horizontal bounding box of start, end and every obstacle control point
-(rounded to the cm; `gen_assets.py --check` fails if the planner moves it).
-`s = 1` except `loiter`, `s = 0.04`: 8 m long at 2.5 m, inside the optical
-flow's band, at the price of every speed scaling by s and the plan having to
-be re-solved with obstacles grown by `0.3 / s` planner metres. The map is
-uniform (z scales too) because a sphere has to stay a sphere.
+`scenarios/*.json` are the planner's numbers, verbatim -- except the
+sim-native ones (`"native": true`, today only `loiter_sim`), which are the
+sim's own numbers in sim metres. Everything the sim flies, scores or draws is
+in the SIM frame, `p_sim = s * (p - c)`, `t` unchanged, with one table and
+one map in `src/dsim_planner/dsim_planner/frames.py`. For an imported
+scenario `c` is the centre of the horizontal bounding box of start, end and
+every obstacle control point (rounded to the cm; `gen_assets.py --check`
+fails if the planner moves it), and `s = 1` for all six. For a sim-native
+scenario the frame is the identity, `s = 1, c = 0`, by construction: its
+origin is meaningful (loiter_sim's station stands on it), so it is not
+re-centred. That is claimed in two places that must agree -- the file's
+`"native": true` and `frames.NATIVE` -- and `check_table_centre` refuses
+either half alone. The map is uniform (z scales too) because a sphere has to
+stay a sphere.
+
+There used to be one `s != 1`: the planner's 200 m `loiter` at `s = 0.04`.
+It fitted the optical-flow band, but the 0.3 m vehicle became 7.5 planner
+metres; grown by that, the bodies reached into the altitude band and the run
+lost its occlusion certificate at N8_seg16. It is no longer imported (below).
 
 A Bezier maps exactly under an affine map of its control points, so
 `solve_plan.py` solves in planner coordinates and maps the answer once; its
 `--inflate` and `--v-max` are in sim units. Every plan records its `frame`;
 the launch and the bridge refuse one whose frame is not the scenario's.
+
+## loiter_sim: the planner's loiter, redesigned for the sim
+
+The planner's `loiter` is the paper's line-of-sight demo: a ground station at
+the origin, a body orbiting ABOVE it and BELOW a transit corridor, the
+corridor laid ON the body's shadow ring so the shadow slides along it, the
+corridor narrower than the shadow so no sidestep clears it, and one lap over
+the horizon. `scripts/sim_scenarios.py` keeps that design and re-picks every
+number for this vehicle and these sensors; its docstring says why each one is
+what it is.
+
+| | | |
+|---|---|---|
+| corridor | y = 1.35 m, x -6..+6, z band 2.1..2.4 (2.25 m axis), +-0.2 m wide | flow band 0.1..3 m; 12 m fits the camera's world |
+| body | r 0.2 m on a 0.9 m orbit at 1.5 m, one lap in 16 s | grown by 0.3 it tops out at 2.0 m, under the 2.1 m floor |
+| shadow | ring 0.9 x 2.25 / 1.5 = 1.35 m (the corridor is ON it), spot r 0.3 m | half-width 0.2 < 0.3: no sidestep clears it |
+| phase | 20 deg, scanned | see `PHASE_DEG` |
+| solver | trust_radius 0.18; free arrival, time_weight 10, v_max 1.5, start weight 1e5 | each measured to matter -- docstring |
+
+The solve flags travel with the scenario (`"solve"` in its file): the design
+is the planner's free-arrival one, `solve_plan.py` and the viewer's solve
+button apply them unless told otherwise, and the plan records what was used
+and where it came from. Pinned at T, the 24-phase scan never once produced a
+baseline that loses the link alongside a run that certifies.
+
+`import_scenarios.py --check` prints why the planner's `loiter` is not
+imported, fails if the planner stops defining it (the record would be stale)
+and fails if a `scenarios/loiter.json` reappears. The new name is deliberate:
+the planner keys solver knobs by scenario name (`SCENARIO_ELASTIC_WEIGHT`), and
+two different problems under one name is how a 200 m-tuned number ends up
+applied to a 12 m scene.
+
+`scripts/loiter_pair.py` measures the design's three claims, in the container:
+each config is solved twice, as `solve_plan.py` would and again with the
+station removed (the baseline), and both are measured with the planner's own
+`los_margin_at` against the REAL bodies. Measured 2026-10-05:
+
+| | N8_seg8 | N8_seg16 |
+|---|---|---|
+| (a) certifies: converged, keep-out + occlusion certificates 0, 0 planes dropped | yes | yes |
+| (a) sampled line of sight, constrained run | +0.652 m | +0.601 m |
+| (b) baseline line of sight (blocked 3.62..3.92 s) | **-0.175 m** | **-0.175 m** |
+| (c) constrained path on the baseline's schedule | **-0.048 m** | **-0.026 m** |
+| reverse graft (baseline path, constrained schedule) | +0.605 m | +0.532 m |
+| arrival, constrained / baseline | 13.46 / 8.00 s | 12.87 / 8.00 s |
+| largest sidestep (corridor half-width 0.2) | 0.147 m | 0.180 m |
+| line of sight while holding the goal until T | +0.899 m | +0.899 m |
+| keep-out clearance for the 0.3 m vehicle | +1.628 m | +1.454 m |
+
+The run waits about 5 s and keeps the link; the baseline goes at the cap and
+loses it for 0.3 s; the constrained path flown on the baseline's clock loses
+it too, so the retiming is what keeps it. Margins are small in absolute terms
+because everything is: the body is 0.2 m.
+
+**Not robust everywhere, and measured as such.** The occlusion certificate is
+sensitive: re-solved at 19.9, 19.99, 20.01 and 20.1 deg, 9 of 10 solves keep
+all three (20.1 deg N8_seg16 does not certify); a 3e-10 s change in a window
+time has flipped N8_seg16 at 15 deg. The phase was picked for the
+neighbourhood that certifies, not for the cleanest single point. Every
+plan's demands are tiny -- 1.5 m/s, 0.28 m/s^2, 1.6 deg of tilt against 8.26
+m/s^2 at the 40 deg clamp -- and the opening step is 0.23..0.26 m/s.
+Not yet flown in the sim.
 
 ## SLAM landmarks
 
@@ -261,8 +333,8 @@ straight seed, because the seed exists to be flown *into* an obstacle. See
 ## Line of sight
 
 A scenario may name `stations`: fixed ground points the vehicle has to stay
-visible from. Only `loiter` has one, at the origin, and its four orbiting
-bodies are what can get in the way.
+visible from. Only `loiter_sim` has one, at the origin, and its orbiting
+body is what can get in the way.
 
 The referee measures the margin directly:
 
@@ -282,9 +354,11 @@ rather than a call into it. The solver never measures the sight line: it builds
 a **convex occlusion relaxation** and certifies that. So there are three
 things, not two — the certificate, the planner's own sampled measurement, and
 the referee's — and `check_planner.py` holds the two measurements against each
-other over the flown run. Measured on `loiter` at full scale: **2.13e-14 m
-over 728 instants**, which is float noise, against a 1e-6 bound. At s = 0.04
-the offline replica reads 2.2e-10 m over 801 instants (yaml rounding).
+other over the flown run. Measured on the planner's `loiter` at full scale
+(since replaced by `loiter_sim`): **2.13e-14 m over 728 instants**, which is
+float noise, against a 1e-6 bound. At s = 0.04 the offline replica read
+2.2e-10 m over 801 instants (yaml rounding). Not yet re-measured on
+`loiter_sim`.
 
 That check earns its keep. It failed twice while being built, and both were
 real defects in the referee:
@@ -295,7 +369,7 @@ real defects in the referee:
   while the planner, asked about t=0, said +49.76 m. The report now describes
   one instant, and carries the position it was measured at;
 * comparing against the viewer's pose instead of the referee's own sample read
-  as 2.5 cm of disagreement at loiter's 3.4 m/s, which is about 7 ms of flight.
+  as 2.5 cm of disagreement at the planner loiter's 3.4 m/s, which is about 7 ms of flight.
 
 Losing sight is recorded the way a collision is: edge-triggered, one
 **blackout** per excursion, carrying which station lost it, to which obstacle,
@@ -328,7 +402,7 @@ rather than of any plan:
 |---|---|---|---|
 | `wall` seed | 0.70 m/s | 0.237 m | 0.339 s |
 | `fence3d` seed | 0.90 | 0.290 | 0.322 |
-| `loiter` N8_seg16 | 1.60 | 0.522 | 0.326 |
+| `loiter` (planner's, retired) N8_seg16 | 1.60 | 0.522 | 0.326 |
 | `diverse` N8_seg4 | 1.68 | 0.526 | 0.313 |
 | `fence3d` N8_seg2 | 3.00 | 0.919 | 0.306 |
 | `curve` N10_seg8 | 3.00 | 1.011 | 0.337 |
@@ -367,10 +441,10 @@ under 2.1° of commanded tilt and 1 cm of travel in the first 2.5 s.
 * Line of sight IS checked now. See below.
 * The estimator is a LOW-ALTITUDE one. Its only velocity aiding is optical
   flow, which needs the ground between 0.1 and 3 m, plus a rangefinder good to
-  4 m. `loiter` at full scale flew at 62.5 m: measured 48 m of tracking
-  error on `state:=est` and 2.2 cm on `state:=truth`. It is now flown at
-  s = 0.04, 2.5 m up, inside that band; `state:=est` there is NOT yet
-  flight-tested.
+  4 m. The planner's `loiter` at full scale flew at 62.5 m: measured 48 m of
+  tracking error on `state:=est` and 2.2 cm on `state:=truth`. Its
+  replacement `loiter_sim` flies at 2.1..2.4 m, inside that band;
+  `state:=est` there is NOT yet flight-tested.
 * The lateral acceleration limit is ~8.3 m/s² at the 40° tilt clamp. That is
   the number the planner is missing a constraint for, and every plan here is
   kept under it by a speed cap chosen by hand rather than by anything in the

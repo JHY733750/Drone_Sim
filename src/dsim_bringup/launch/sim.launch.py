@@ -541,9 +541,10 @@ def generate_launch_description():
         DeclareLaunchArgument('world', default_value='empty',
                               description='world file stem in worlds/: empty, or a '
                                           'space-time scenario (fence3d, door3d, wall, '
-                                          'original, curve, diverse, loiter). Scenario '
+                                          'original, curve, diverse, loiter_sim). Scenario '
                                           'worlds are generated from scenarios/*.json, '
-                                          'which come from the planner.'),
+                                          'which come from the planner (loiter_sim: from '
+                                          'scripts/sim_scenarios.py).'),
         DeclareLaunchArgument('gui', default_value='true',
                               description='run the Gazebo GUI'),
         DeclareLaunchArgument('reference', default_value='circle',

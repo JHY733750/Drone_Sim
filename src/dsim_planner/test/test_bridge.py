@@ -80,10 +80,12 @@ def test_a_plan_with_no_frame_is_refused(tmp_path):
 
 
 def test_a_plan_in_a_stale_frame_is_refused(tmp_path):
-    doc = json.loads((PLANS / "loiter_seed.json").read_text())
-    doc["frame"]["scale"] = 1.0
+    # The frame the planner's loiter used to be flown in: a plan solved then
+    # is in the wrong place now, and has to be refused rather than flown.
+    doc = json.loads((PLANS / "loiter_sim_seed.json").read_text())
+    doc["frame"]["scale"] = 0.04
     with pytest.raises(spacetime.PlanError, match="re-solve"):
-        load_plan(_write(tmp_path, doc), "loiter")
+        load_plan(_write(tmp_path, doc), "loiter_sim")
 
 
 def test_a_plan_for_another_world_is_refused(tmp_path):
