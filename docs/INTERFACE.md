@@ -374,6 +374,26 @@ the controller's frame handling and not about the estimator. Compared against
 `/drone/truth` instead, a velocity on `est` would differ by the estimation
 error (measured 2.4–5.7 cm/s in the turn against a 4 mm/s tolerance).
 
+## SLAM odometry (standalone, not yet launched by the sim)
+
+`src/dsim_slam` estimates position from a D435 point cloud and the gyro, and
+is the intended replacement for the truth position above. It reads only
+what a real drone has — `sensor_msgs/PointCloud2` (realsense-ros, optical
+frame), `/drone/imu`, and the static TF `base_link` → camera — and never
+`/drone/truth`. `ros2 launch dsim_slam slam.launch.py`.
+
+| Direction | Topic | Type |
+|---|---|---|
+| sim → slam | `/camera/camera/depth/color/points` | `sensor_msgs/msg/PointCloud2` |
+| slam → you | `/slam/odom` | `nav_msgs/msg/Odometry`, `map` → `base_link`, honest covariance |
+| slam → you | `/slam/status` | `diagnostic_msgs/msg/DiagnosticStatus`: OK = TRACKING, WARN = DEGRADED, ERROR = LOST, with the reason |
+
+Do not close a position loop on it unless the status is OK. Measured drift on
+a synthetic survey is 1–2.5 % of distance flown, and a single wall 2–3 m away
+is a known case where it reports TRACKING while sliding along the wall. The
+interface, the algorithm, every measured number and the failure modes are in
+[src/dsim_slam/README.md](../src/dsim_slam/README.md).
+
 ## Publishing a trajectory
 
 ```cpp

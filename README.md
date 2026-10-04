@@ -150,6 +150,7 @@ src/dsim_eval/              the referee: collision, signed clearance vs moving o
 src/dsim_planner/           space-time Bezier (x, y, z, t) -> /drone/trajectory, uniform in time
 src/dsim_sensors/           simulated rangefinder, optical flow and compass, with noise
 src/dsim_estimation/        attitude + velocity from those sensors; what the controller flies on
+src/dsim_slam/              depth-camera + gyro scan-to-map odometry (standalone; see its README)
 src/dsim_bringup/           launch, bridge, RViz
 src/dsim_simctl/            the only write path into the sim: pause, playback speed, reset
 src/dsim_time/              shared rule: sim time going backwards means the run restarted

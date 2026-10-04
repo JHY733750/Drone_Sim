@@ -1,0 +1,59 @@
+# dsim_slam tuning. Every value here is the library default (see
+# include/dsim_slam/scan_odometry.hpp, voxel_map.hpp, registration.hpp for the
+# reason behind each); it is listed so the launch file shows what can be
+# turned, not because these differ from the code.
+#
+# NOTHING in this file may refer to ground truth, a scenario or an obstacle
+# list: the node runs unchanged on a real drone.
+dsim_slam:
+  ros__parameters:
+    # ---- interface ----------------------------------------------------------
+    cloud_topic: /camera/camera/depth/color/points   # realsense-ros 4.x default
+    imu_topic: /drone/imu
+    odom_topic: /slam/odom
+    status_topic: /slam/status
+    map_frame: map
+    base_frame: base_link
+    publish_tf: false          # the sim has its own TF owner
+    status_rate_hz: 5.0        # the watchdog: LOST when clouds stop
+
+    # ---- where the map starts ------------------------------------------------
+    initial_xyz: [0.0, 0.0, 0.0]
+    initial_yaw: 0.0
+    gravity_align: true        # roll/pitch from the resting accelerometer
+
+    # ---- sensor model (D435 at 424x240) -------------------------------------
+    min_depth_m: 0.28
+    max_depth_m: 6.0           # the camera reports to 10 m; sigma there is ~0.7 m
+    depth_noise_floor_m: 0.005
+    depth_noise_quadratic: 0.0072   # sigma_z = k z^2, k = subpixel / (f_px * baseline)
+    gyro_noise_rad_s: 1.0e-3   # for the twist covariance only
+
+    # ---- registration ---------------------------------------------------------
+    source_voxel_m: 0.20
+    max_registration_sigma_m: 0.15
+    map_voxel_m: 0.25
+    map_radius_m: 12.0
+    max_voxel_sigma_m: 0.10
+    max_iterations: 20
+    initial_threshold_m: 0.10
+    min_threshold_m: 0.05
+    judge_wide_normals: false  # true: catches a single wall at 2-3 m, costs drift (README)
+
+    # ---- motion prior -----------------------------------------------------------
+    use_imu_prior: true
+    prior_rate_sigma_imu: 0.01
+    prior_rotation_floor_imu: 0.0005   # RAISE on hardware with an unsynchronised camera
+    velocity_sigma: 1.0
+    velocity_correlation_time_s: 5.0
+
+    # ---- verdicts and covariance ---------------------------------------------
+    min_source_points: 60
+    min_correspondences: 40
+    degraded_inlier_fraction: 0.10
+    degeneracy_translation_min: 0.025
+    degeneracy_rotation_min: 0.02
+    drift_per_metre: 0.01      # EMPIRICAL (synthetic survey); re-measure on real data
+    lost_velocity_sigma: 1.0
+    reset_map_after_lost_s: 1.0
+    scan_timeout_s: 0.5
