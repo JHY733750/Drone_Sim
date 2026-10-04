@@ -1001,19 +1001,13 @@ TEST(StateMux, TheGyroIsIgnoredWhenBodyRateIsTruth)
   EXPECT_LT((m.state().angular_rate - t.twist_angular).norm(), 1e-12);
 }
 
-// FAILS IF: position=slam is accepted (nothing feeds it, so the vehicle would
-// fly on whatever the fallback was), or the refusal does not say why, or the
-// vocabulary check lets a typo through as a silent default.
-TEST(StateSources, SlamIsAcceptedAsANameAndRefusedUntilWired)
+// FAILS IF: slam is accepted for a field it cannot provide, or refused for
+// the one it can.
+TEST(StateSources, SlamIsAPositionSourceOnly)
 {
-  try {
-    StateSources::fromNames("slam", "est", "est", "est");
-    FAIL() << "position=slam was accepted";
-  } catch (const std::invalid_argument & e) {
-    EXPECT_NE(std::string(e.what()).find("not wired"), std::string::npos) << e.what();
-  }
-  // slam is only ever a position source.
+  EXPECT_EQ(StateSources::fromNames("slam", "est", "est", "est").position, Source::Slam);
   EXPECT_THROW(StateSources::fromNames("est", "slam", "est", "est"), std::invalid_argument);
+  EXPECT_THROW(StateSources::fromNames("est", "est", "slam", "est"), std::invalid_argument);
   EXPECT_THROW(StateSources::fromNames("est", "est", "est", "slam"), std::invalid_argument);
   // Typos are refused, not defaulted.
   EXPECT_THROW(StateSources::fromNames("truht", "est", "est", "est"), std::invalid_argument);
@@ -1084,4 +1078,51 @@ TEST(StateMux, AResetWaitsForEverySelectedSourceAgain)
   EXPECT_EQ(m.health(0.004, 0.5, 0.5).status, StateMux::Status::Waiting);
   m.onEst(estSample(), 0.008);
   EXPECT_EQ(m.health(0.008, 0.5, 0.5).status, StateMux::Status::Ready);
+}
+
+
+// FAILS IF: position=slam reads position from anything but /slam/odom, or
+// lets SLAM's (stale, drifting) orientation or velocity leak into the other
+// fields, or flies before the first SLAM pose.
+TEST(StateMux, SlamFeedsPositionAndNothingElse)
+{
+  const auto sel = pick(Source::Slam, Source::Est, Source::Est, Source::Est);
+  StateMux m(sel, true, kMaxRate, kGyroTau);
+  const OdomSample t = truthSample();
+  const OdomSample e = estSample();
+  m.onGyro(kGyro, 0.0);
+  m.onTruth(t, 0.0);
+  m.onEst(e, 0.0);
+  EXPECT_EQ(m.health(0.0, 0.1, 0.1).status, StateMux::Status::Waiting);
+  EXPECT_TRUE(std::isinf(m.slamAge(0.0)));
+
+  OdomSample slam;
+  slam.position = Eigen::Vector3d(7.0, -3.0, 1.25);
+  slam.orientation = Eigen::Quaterniond(Eigen::AngleAxisd(2.0, Eigen::Vector3d::UnitZ()));
+  slam.twist_linear = Eigen::Vector3d(9.0, 9.0, 9.0);
+  m.onSlam(slam, 0.01);
+  EXPECT_EQ(m.health(0.01, 0.1, 0.1).status, StateMux::Status::Ready);
+  const State s = m.state();
+  EXPECT_LT((s.position - slam.position).norm(), 1e-12);
+  EXPECT_LT(quatDistance(s.orientation, e.orientation.normalized()), 1e-12);
+  EXPECT_LT((s.velocity - e.orientation.normalized() * e.twist_linear).norm(), 1e-12);
+  EXPECT_NEAR(m.slamAge(0.31), 0.30, 1e-12);
+}
+
+// FAILS IF: a quiet SLAM cuts the motors like a stale truth/est source. The
+// controller must still have a state to HOLD on (its hold is the whole point
+// of noticing LOST), so SLAM's age is reported, not turned into Stale.
+TEST(StateMux, AQuietSlamIsNotAMotorCut)
+{
+  const auto sel = pick(Source::Slam, Source::Est, Source::Est, Source::Est);
+  StateMux m(sel, true, kMaxRate, kGyroTau);
+  m.onGyro(kGyro, 0.0);
+  m.onEst(estSample(), 0.0);
+  m.onSlam(truthSample(), 0.0);
+  m.onEst(estSample(), 5.0);
+  m.onGyro(kGyro, 5.0);
+  EXPECT_EQ(m.health(5.0, 0.1, 0.1).status, StateMux::Status::Ready);
+  EXPECT_NEAR(m.slamAge(5.0), 5.0, 1e-12);
+  m.reset(6.0);
+  EXPECT_TRUE(std::isinf(m.slamAge(6.0)));   // a reset forgets the old run's pose
 }

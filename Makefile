@@ -96,15 +96,21 @@ test-overlay:
 test-viewer:
 	cd web && node --test js/test/viewer.test.js
 
+# State-source and sensor switches given to make (make plan STATE=truth,
+# make fly SRC_POSITION=slam ...) must be handed INTO the container
+# explicitly: `docker compose exec` does not inherit the host environment, so
+# without this they were accepted by make and silently dropped.
+SIM_ENV = $(foreach v,STATE SRC_POSITION SRC_VELOCITY SRC_ATTITUDE SRC_BODY_RATE DEPTHCAM SLAM,$(if $($(v)),-e $(v)="$($(v))",))
+
 fly:
-	$(COMPOSE) exec sim bash -lc "colcon build --symlink-install >/dev/null && \
+	$(COMPOSE) exec $(SIM_ENV) sim bash -lc "colcon build --symlink-install >/dev/null && \
 		bash scripts/flight_check.sh"
 
 # Flies PLAN (default: the straight seed through the fence, which must HIT)
 # headless and grades it with scripts/check_planner.py.
 #   make plan PLAN=plans/fence3d_seed.json
 plan:
-	$(COMPOSE) exec -e PLAN="$(PLAN)" sim bash -lc "colcon build --symlink-install >/dev/null && \
+	$(COMPOSE) exec -e PLAN="$(PLAN)" $(SIM_ENV) sim bash -lc "colcon build --symlink-install >/dev/null && \
 		bash scripts/plan_check.sh"
 
 # The planner. `planner-sync` copies the MacBook worktree (minus its build

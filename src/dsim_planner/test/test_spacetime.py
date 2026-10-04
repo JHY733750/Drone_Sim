@@ -184,3 +184,59 @@ def test_summary_reports_the_seed_honestly():
     assert s["max_speed_mps"] == pytest.approx(0.9, abs=1e-9)
     assert s["max_accel_mps2"] == pytest.approx(0.0, abs=1e-9)
     assert s["max_tilt_deg"] == pytest.approx(0.0, abs=1e-9)
+
+
+# ---- yaw along travel -------------------------------------------------------
+def _wrap(a):
+    return (a + math.pi) % (2 * math.pi) - math.pi
+
+
+def test_travel_yaw_points_along_a_diagonal():
+    # FAILS IF: atan2 arguments swapped (yaw = atan2(vx, vy)) -- on a diagonal
+    # other than 45 deg that reads 90 deg minus the truth.
+    P = [[0.0, 0.0, 1.0, 0.0], [3.0, 1.0, 1.0, 2.0], [6.0, 2.0, 1.0, 4.0]]
+    yaws = st.travel_yaw(st.sample_uniform_in_time(P, 0.05))
+    want = math.atan2(1.0, 3.0)
+    assert all(abs(_wrap(y - want)) < 1e-9 for y, _ in yaws)
+    assert all(abs(r) < 1e-9 for _, r in yaws)          # straight line: no turning
+
+
+def test_travel_yaw_rate_is_the_derivative_of_the_yaw():
+    # FAILS IF: the rate's sign or formula is wrong -- compared against a
+    # finite difference of the yaw itself, two independent computations.
+    P = [[0.0, 0.0, 1.0, 0.0], [4.0, 0.0, 1.0, 2.0], [4.0, 4.0, 1.0, 4.0], [0.0, 4.0, 1.0, 6.0]]
+    s = st.sample_uniform_in_time(P, 0.01)
+    yaws = st.travel_yaw(s, max_rate=100.0)
+    checked = 0
+    for k in range(1, len(s) - 1):
+        if math.hypot(*s[k][2][:2]) < 0.5:
+            continue
+        fd = _wrap(yaws[k + 1][0] - yaws[k - 1][0]) / (s[k + 1][0] - s[k - 1][0])
+        assert yaws[k][1] == pytest.approx(fd, abs=2e-3 + 1e-3 * abs(fd))
+        checked += 1
+    assert checked > 100
+    assert max(r for _, r in yaws) > 0.2          # it does turn, left (CCW): +rate
+
+
+def test_travel_yaw_holds_through_a_standing_start():
+    # FAILS IF: the yaw before the vehicle moves is 0 (or atan2 of a zero
+    # velocity) instead of the direction it is about to take -- the vehicle
+    # would swing round as it sets off. Plan: wait, then go along -y.
+    P = [[0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 1.0, 2.0], [0.0, -4.0, 1.0, 4.0]]
+    yaws = st.travel_yaw(st.sample_uniform_in_time(P, 0.05))
+    assert all(abs(_wrap(y + math.pi / 2)) < 1e-6 for y, _ in yaws)
+
+
+def test_travel_yaw_gives_up_on_a_plan_that_never_moves_sideways():
+    # FAILS IF: a pure climb gets a made-up direction instead of None (the
+    # caller then keeps its fixed yaw).
+    P = [[1.0, 1.0, 0.5, 0.0], [1.0, 1.0, 3.0, 5.0]]
+    assert st.travel_yaw(st.sample_uniform_in_time(P, 0.05)) is None
+
+
+def test_travel_yaw_rate_is_clamped_but_yaw_is_not():
+    P = [[0.0, 0.0, 1.0, 0.0], [4.0, 0.0, 1.0, 2.0], [4.0, 4.0, 1.0, 4.0], [0.0, 4.0, 1.0, 6.0]]
+    s = st.sample_uniform_in_time(P, 0.01)
+    free, clamped = st.travel_yaw(s, max_rate=100.0), st.travel_yaw(s, max_rate=0.1)
+    assert max(abs(r) for _, r in clamped) <= 0.1 + 1e-12
+    assert [y for y, _ in free] == [y for y, _ in clamped]

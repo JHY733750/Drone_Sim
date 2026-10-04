@@ -97,3 +97,14 @@ def test_with_no_scenario_given_the_plan_is_held_to_its_own(tmp_path):
     del doc["frame"]
     with pytest.raises(spacetime.PlanError):
         load_plan(_write(tmp_path, doc))
+
+
+def test_travel_mode_puts_the_nose_along_the_plan():
+    # FAILS IF: the bridge ignores yaw_mode and flies the fixed yaw.
+    diag = [[0.0, 0.0, 1.0, 0.0], [3.0, 3.0, 1.0, 4.0]]
+    msg, _ = build_trajectory(diag, 10.0, 0.05, 0.0, "travel")
+    assert msg.points[10].yaw == pytest.approx(math.pi / 4)
+    msg, _ = build_trajectory(diag, 10.0, 0.05, 0.0, "fixed")
+    assert msg.points[10].yaw == 0.0
+    with pytest.raises(Exception):
+        build_trajectory(diag, 10.0, 0.05, 0.0, "sideways")

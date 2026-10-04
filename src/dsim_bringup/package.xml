@@ -17,6 +17,8 @@
   <exec_depend>dsim_viz</exec_depend>
   <exec_depend>dsim_description</exec_depend>
   <exec_depend>dsim_truth</exec_depend>
+  <exec_depend>dsim_depthcam</exec_depend>
+  <exec_depend>dsim_slam</exec_depend>
   <exec_depend>rviz2</exec_depend>
   <export><build_type>ament_cmake</build_type></export>
 </package>

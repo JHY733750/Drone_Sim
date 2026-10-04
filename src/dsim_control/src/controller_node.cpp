@@ -38,6 +38,7 @@
 #include <string>
 
 #include <rclcpp/rclcpp.hpp>
+#include <diagnostic_msgs/msg/diagnostic_status.hpp>
 #include <nav_msgs/msg/odometry.hpp>
 #include <sensor_msgs/msg/imu.hpp>
 #include <actuator_msgs/msg/actuators.hpp>
@@ -127,6 +128,12 @@ public:
       declare_parameter("state.truth_topic", std::string("/drone/truth_exact"));
     const std::string est_topic =
       declare_parameter("state.est_topic", std::string("/drone/state_est"));
+    const std::string slam_topic =
+      declare_parameter("state.slam_topic", std::string("/slam/odom"));
+    const std::string slam_status_topic =
+      declare_parameter("state.slam_status_topic", std::string("/slam/status"));
+    // No SLAM pose for this long is treated exactly like SLAM saying LOST.
+    slam_timeout_s_ = declare_parameter("state.slam_timeout_s", 0.5);
     StateSources sources;
     try {
       sources = StateSources::fromNames(src_pos, src_vel, src_att, src_rate);
@@ -154,6 +161,14 @@ public:
       est_sub_ = create_subscription<nav_msgs::msg::Odometry>(
         est_topic, qos,
         [this](nav_msgs::msg::Odometry::SharedPtr msg) {onEst(*msg);});
+    }
+    if (sources.uses(Source::Slam)) {
+      slam_sub_ = create_subscription<nav_msgs::msg::Odometry>(
+        slam_topic, qos,
+        [this](nav_msgs::msg::Odometry::SharedPtr msg) {onSlam(*msg);});
+      slam_status_sub_ = create_subscription<diagnostic_msgs::msg::DiagnosticStatus>(
+        slam_status_topic, rclcpp::QoS(10),
+        [this](diagnostic_msgs::msg::DiagnosticStatus::SharedPtr msg) {onSlamStatus(*msg);});
     }
     if (sources.usesGyro()) {
       imu_sub_ = create_subscription<sensor_msgs::msg::Imu>(
@@ -310,6 +325,45 @@ private:
     mux_->onEst(s, now);
   }
 
+  /// position=slam: dsim_slam's pose, map frame = world (the launch anchors
+  /// the map at the spawn pose).
+  void onSlam(const nav_msgs::msg::Odometry & msg)
+  {
+    const OdomSample s = unpack(msg);
+    const double now = nowSeconds();
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    mux_->onSlam(s, now);
+  }
+
+  /// SLAM's own verdict. ERROR = LOST: latch the hold. WARN (degraded) keeps
+  /// flying -- SLAM's covariance already says how much to trust it -- but is
+  /// logged, so a run that crept through a degenerate stretch says so.
+  void onSlamStatus(const diagnostic_msgs::msg::DiagnosticStatus & msg)
+  {
+    if (msg.level == diagnostic_msgs::msg::DiagnosticStatus::ERROR) {
+      latchSlamHold("SLAM reports LOST: " + msg.message);
+    } else if (msg.level == diagnostic_msgs::msg::DiagnosticStatus::WARN) {
+      RCLCPP_WARN_THROTTLE(
+        get_logger(), steady_, 2000, "SLAM degraded: %s", msg.message.c_str());
+    }
+  }
+
+  /// The user's rule for losing SLAM: HOLD. Stop following the plan and hover
+  /// where SLAM last put the vehicle, for the rest of the run (a reset clears
+  /// it). Latched rather than resumed on recovery, because a pose that came
+  /// back after a gap may have jumped, and silently picking the plan up again
+  /// from there would hide that. Not a motor cut: velocity and attitude come
+  /// from other sources and are still good, which is what holding needs.
+  void latchSlamHold(const std::string & why)
+  {
+    if (slam_lost_) {return;}
+    slam_lost_ = true;
+    slam_hold_pending_ = true;
+    RCLCPP_ERROR(
+      get_logger(), "%s -- abandoning the plan and HOLDING position until reset",
+      why.c_str());
+  }
+
   /// Body angular rate, from the gyro, for body_rate=est. Everything about why
   /// is in body_rate_source.hpp; the short version is that a gyro measures
   /// rate while a differentiated attitude can jump without the attitude moving.
@@ -369,6 +423,8 @@ private:
       // Forgetting the state idles the motors until a fresh one arrives --
       // from every selected source, not just the first to speak.
       mux_->reset(now);
+      slam_lost_ = false;
+      slam_hold_pending_ = false;
     }
 
     State state;
@@ -400,8 +456,32 @@ private:
       return;
     }
 
+    double slam_age = 0.0;
+    if (mux_->sources().position == Source::Slam) {
+      {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        slam_age = mux_->slamAge(now);
+      }
+      if (slam_age > slam_timeout_s_) {
+        char buf[96];
+        std::snprintf(buf, sizeof(buf), "no SLAM pose for %.2f s", slam_age);
+        latchSlamHold(buf);
+      }
+    }
+
     Reference ref;
-    if (auto sampled = buffer_.sample(now)) {
+    if (slam_lost_) {
+      if (slam_hold_pending_) {
+        slam_hold_position_ = state.position;
+        slam_hold_yaw_ = yawFromQuat(state.orientation);
+        slam_hold_pending_ = false;
+      }
+      ref.position = slam_hold_position_;
+      ref.yaw = slam_hold_yaw_;
+      RCLCPP_ERROR_THROTTLE(
+        get_logger(), steady_, 5000, "HOLDING at (%.2f, %.2f, %.2f): SLAM was lost",
+        slam_hold_position_.x(), slam_hold_position_.y(), slam_hold_position_.z());
+    } else if (auto sampled = buffer_.sample(now)) {
       ref = *sampled;
       hold_valid_ = false;
     } else {
@@ -591,6 +671,12 @@ private:
   /// residual is under 1e-9, so this sits an order of magnitude above it.
   static constexpr double kWrenchTol = 1e-8;
 
+  double slam_timeout_s_ {0.5};
+  bool slam_lost_ {false};
+  bool slam_hold_pending_ {false};
+  Eigen::Vector3d slam_hold_position_ {Eigen::Vector3d::Zero()};
+  double slam_hold_yaw_ {0.0};
+
   bool hold_valid_ {false};
   Eigen::Vector3d hold_position_ {Eigen::Vector3d::Zero()};
   double hold_yaw_ {0.0};
@@ -598,6 +684,8 @@ private:
   rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr truth_sub_;
   rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr est_sub_;
   rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr imu_sub_;
+  rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr slam_sub_;
+  rclcpp::Subscription<diagnostic_msgs::msg::DiagnosticStatus>::SharedPtr slam_status_sub_;
   rclcpp::Subscription<dsim_msgs::msg::Trajectory>::SharedPtr traj_sub_;
   rclcpp::Publisher<actuator_msgs::msg::Actuators>::SharedPtr cmd_pub_;
   rclcpp::Publisher<dsim_msgs::msg::TrajectorySetpoint>::SharedPtr setpoint_pub_;

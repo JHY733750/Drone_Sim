@@ -1,6 +1,7 @@
 #include "dsim_control/state_mux.hpp"
 
 #include <cstdio>
+#include <limits>
 #include <stdexcept>
 
 namespace dsim_control
@@ -45,14 +46,6 @@ StateSources StateSources::fromNames(
   s.velocity = parseOne("velocity", velocity);
   s.attitude = parseOne("attitude", attitude);
   s.body_rate = parseOne("body_rate", body_rate);
-  if (s.position == Source::Slam) {
-    // Refused, not degraded. A controller asked to fly on SLAM that quietly
-    // flew on something else would make every comparison drawn from that run
-    // wrong, and nothing in the output would say so.
-    throw std::invalid_argument(
-            "position=slam is not wired yet: nothing feeds /slam/odom into the "
-            "controller. Fly on position=est or position=truth until it is.");
-  }
   return s;
 }
 
@@ -82,8 +75,10 @@ StateMux::StateMux(
   gyro_(max_body_rate_rad_s, gyro_tau_s),
   truth_rate_(max_body_rate_rad_s, 0.0)
 {
-  if (sources_.uses(Source::Slam)) {
-    throw std::invalid_argument("StateMux: slam is not a wired source");
+  if (sources_.velocity == Source::Slam || sources_.attitude == Source::Slam ||
+    sources_.body_rate == Source::Slam)
+  {
+    throw std::invalid_argument("StateMux: slam provides position only");
   }
 }
 
@@ -108,6 +103,18 @@ void StateMux::onEst(const OdomSample & m, double now)
   last_est_s_ = now;
 }
 
+void StateMux::onSlam(const OdomSample & m, double now)
+{
+  slam_ = m;
+  have_slam_ = true;
+  last_slam_s_ = now;
+}
+
+double StateMux::slamAge(double now) const
+{
+  return have_slam_ ? now - last_slam_s_ : std::numeric_limits<double>::infinity();
+}
+
 void StateMux::onGyro(const Eigen::Vector3d & measured, double now)
 {
   const double dt = have_gyro_ ? (now - last_gyro_s_) : 0.0;
@@ -120,8 +127,10 @@ void StateMux::reset(double now)
 {
   have_truth_ = false;
   have_est_ = false;
+  have_slam_ = false;
   last_truth_s_ = now;
   last_est_s_ = now;
+  last_slam_s_ = now;
   last_gyro_s_ = now;
 }
 
@@ -131,8 +140,12 @@ StateMux::Health StateMux::health(
   const bool need_truth = sources_.uses(Source::Truth);
   const bool need_est = sources_.usesEstOdometry();
   const bool need_gyro = sources_.usesGyro();
+  // SLAM gates the start only. Its staleness is the controller's call (hold,
+  // not cut): see the header.
+  const bool need_slam = sources_.uses(Source::Slam);
 
   if ((need_truth && !have_truth_) || (need_est && !have_est_) ||
+    (need_slam && !have_slam_) ||
     (need_gyro && !(have_gyro_ && gyro_.valid())) ||
     (sources_.body_rate == Source::Truth && !truth_rate_.valid()))
   {
@@ -165,7 +178,7 @@ Eigen::Vector3d StateMux::worldVelocity(const OdomSample & m) const
 State StateMux::state() const
 {
   auto pick = [this](Source s) -> const OdomSample & {
-      return s == Source::Truth ? truth_ : est_;
+      return s == Source::Truth ? truth_ : s == Source::Slam ? slam_ : est_;
     };
   State s;
   s.position = pick(sources_.position).position;

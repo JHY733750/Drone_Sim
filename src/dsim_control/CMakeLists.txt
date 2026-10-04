@@ -11,6 +11,7 @@ endif()
 find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(nav_msgs REQUIRED)
+find_package(diagnostic_msgs REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(std_srvs REQUIRED)
@@ -38,7 +39,7 @@ ament_target_dependencies(dsim_control_core PUBLIC dsim_msgs geometry_msgs)
 # --- nodes ------------------------------------------------------------------
 add_executable(controller_node src/controller_node.cpp)
 target_link_libraries(controller_node dsim_control_core)
-ament_target_dependencies(controller_node
+ament_target_dependencies(controller_node diagnostic_msgs
   rclcpp nav_msgs sensor_msgs geometry_msgs std_srvs actuator_msgs dsim_msgs
   dsim_time)
 

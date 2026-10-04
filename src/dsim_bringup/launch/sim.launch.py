@@ -149,6 +149,24 @@ def resolve_sources(state, overrides):
     return out
 
 
+def _on_off(value, name, auto):
+    """'true' | 'false' | 'auto' (auto -> the given default)."""
+    if value == 'auto':
+        return auto
+    if value not in ('true', 'false'):
+        raise RuntimeError(f'{name}:={value} is not one of true | false | auto')
+    return value == 'true'
+
+
+def _spawn_pose(world_root):
+    """x y z roll pitch yaw of the included model named 'drone'."""
+    for inc in world_root.findall('include'):
+        if (inc.findtext('name') or '').strip() == 'drone':
+            pose = [float(v) for v in (inc.findtext('pose') or '0 0 0 0 0 0').split()]
+            return (pose + [0.0] * 6)[:6]
+    raise RuntimeError('the world has no <include> named drone; cannot anchor SLAM')
+
+
 def launch_setup(context, *args, **kwargs):
     world = LaunchConfiguration('world').perform(context)
     gui = LaunchConfiguration('gui').perform(context)
@@ -342,6 +360,47 @@ def launch_setup(context, *args, **kwargs):
     )
 
     nodes = [gz, bridge, controller, referee]
+
+    # ---- depth camera + SLAM ------------------------------------------------
+    # Two separate components on purpose, so either can be swapped for the
+    # real thing: dsim_depthcam publishes exactly what realsense-ros does for a
+    # D435 (it is the sim-only half: it reads /drone/truth and the scenario),
+    # and dsim_slam reads only that cloud, the IMU and TF -- it would run
+    # unchanged on hardware. auto = on exactly when position=slam needs them.
+    want_cam = _on_off(LaunchConfiguration('depthcam').perform(context), 'depthcam',
+                       sources['position'] == 'slam')
+    want_slam = _on_off(LaunchConfiguration('slam').perform(context), 'slam',
+                        sources['position'] == 'slam')
+    if sources['position'] == 'slam' and not (want_cam and want_slam):
+        raise RuntimeError('position=slam needs depthcam:=true and slam:=true')
+    if want_slam and not want_cam:
+        raise RuntimeError('slam:=true needs the depth camera (depthcam:=true): '
+                           'nothing else publishes a cloud for it')
+    if want_cam:
+        cam_params = [{'use_sim_time': True}]
+        landmarks_file = os.path.join(CONFIG_DIR, f'landmarks_{world}.yaml')
+        if os.path.exists(landmarks_file):
+            cam_params[0]['landmarks_file'] = landmarks_file
+        if os.path.exists(obstacles_file):
+            cam_params.append(obstacles_file)   # the referee's obstacles, same clock
+        nodes.append(Node(
+            package='dsim_depthcam', executable='depthcam_node', name='dsim_depthcam',
+            output='screen', parameters=cam_params,
+        ))
+    if want_slam:
+        # The SLAM map is anchored at the spawn pose, read from the same world
+        # file Gazebo spawns from -- a real vehicle knows where it took off.
+        # That makes map = world, so /slam/odom is directly a world position.
+        spawn = _spawn_pose(world_root)
+        nodes.append(Node(
+            package='dsim_slam', executable='slam_node', name='dsim_slam',
+            output='screen',
+            parameters=[os.path.join(get_package_share_directory('dsim_slam'),
+                                     'config', 'slam.yaml'),
+                        {'use_sim_time': True,
+                         'initial_xyz': [float(v) for v in spawn[:3]],
+                         'initial_yaw': float(spawn[5])}],
+        ))
 
     # ---- simulated onboard sensors ----------------------------------------
     # Derived from ground truth with a configured error model. Separate from
@@ -541,6 +600,12 @@ def generate_launch_description():
                               description='est (the gyro, gated and low-passed '
                               'per gains.yaml) | truth (the engine\'s angular '
                               'velocity, gated only); empty follows state:='),
+        DeclareLaunchArgument('depthcam', default_value='auto',
+                              description='simulated D435 point cloud: true | false | '
+                              'auto (on when src_position:=slam)'),
+        DeclareLaunchArgument('slam', default_value='auto',
+                              description='dsim_slam on the depth cloud: true | false | '
+                              'auto (on when src_position:=slam)'),
         DeclareLaunchArgument('noise_seed', default_value='1',
                               description='RNG seed for the sensor noise. '
                               'Fixed by default, which gives a repeatable '

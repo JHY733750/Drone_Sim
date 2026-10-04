@@ -21,9 +21,13 @@
 // low-pass disabled, and the gate returns its input unchanged for anything a
 // quadrotor can physically do.
 //
-// position has a third name, slam, reserved for /slam/odom. It is accepted as
-// a name so the launch vocabulary is stable, and refused here because nothing
-// feeds it yet -- see StateSources::fromNames.
+// position has a third source, slam: /slam/odom from dsim_slam, the depth
+// camera's scan-matching odometry (map frame = world, anchored at the spawn
+// pose by the launch). Only position may take it. SLAM going LOST or quiet is
+// NOT a reason to cut the motors the way a stale truth/est source is: the
+// controller latches a position HOLD instead (controller_node.cpp), so here a
+// slam source only gates Waiting -- its age is reported by slamAge() for the
+// controller to judge.
 //
 // Nothing here knows about ROS, so it is unit tested on the host.
 
@@ -50,9 +54,9 @@ struct StateSources
   Source body_rate {Source::Est};
 
   /// Parse and validate the four names. THE place a selection is accepted or
-  /// refused: unknown names, slam on a field other than position, and slam on
-  /// position (not wired yet) all throw std::invalid_argument with a message
-  /// meant for a person reading the launch log.
+  /// refused: unknown names and slam on a field other than position throw
+  /// std::invalid_argument with a message meant for a person reading the
+  /// launch log.
   static StateSources fromNames(
     const std::string & position, const std::string & velocity,
     const std::string & attitude, const std::string & body_rate);
@@ -91,6 +95,10 @@ public:
 
   void onTruth(const OdomSample & m, double now);
   void onEst(const OdomSample & m, double now);
+  /// One /slam/odom pose (position is all that is read).
+  void onSlam(const OdomSample & m, double now);
+  /// Seconds since the last SLAM pose, or +inf if none has arrived.
+  double slamAge(double now) const;
   /// One gyro sample. Feeds the est body-rate path; state() reads that path
   /// only when body_rate=est.
   void onGyro(const Eigen::Vector3d & measured, double now);
@@ -138,6 +146,9 @@ private:
   bool have_est_ {false};
   double last_truth_s_ {0.0};
   double last_est_s_ {0.0};
+  OdomSample slam_;
+  bool have_slam_ {false};
+  double last_slam_s_ {0.0};
 
   BodyRateSource gyro_;        // body_rate=est
   BodyRateSource truth_rate_;  // body_rate=truth: gate only, tau = 0

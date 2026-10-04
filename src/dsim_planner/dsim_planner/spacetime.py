@@ -147,6 +147,44 @@ def sample_uniform_in_time(P: Sequence[Point], dt: float):
     return out
 
 
+def travel_yaw(samples, v_min: float = 0.3, max_rate: float = 2.0):
+    """[(yaw, yaw_rate), ...] pointing the nose along horizontal travel.
+
+    The forward-looking depth camera sees only what the nose points at, so a
+    vehicle flying yaw 0 down a 45 degree diagonal never sees the left of its
+    path. Here yaw = atan2(vy, vx) and, from the same samples,
+    yaw_rate = (vx*ay - vy*ax) / (vx^2 + vy^2) -- the exact derivative of
+    that angle, so it is feedforward that agrees with the yaw it comes with.
+
+    Below `v_min` of horizontal speed the direction is noise (a plan opens at
+    a standing start; a vertical climb has none), so the yaw is HELD: at the
+    last direction seen, or before any, at the first direction the plan will
+    take -- the vehicle turns to face its route while it waits at the start,
+    not with a lurch as it sets off. A plan that never moves horizontally
+    faster than v_min returns None: the caller keeps its fixed yaw.
+
+    The rate is clamped to `max_rate` because it grows as 1/speed near
+    v_min; the yaw itself is not clamped, so the clamp only softens the
+    feedforward, never moves the target.
+    """
+    if not v_min > 0.0:
+        raise PlanError(f"v_min must be positive, got {v_min}")
+    first = next((math.atan2(s[2][1], s[2][0]) for s in samples
+                  if math.hypot(s[2][0], s[2][1]) >= v_min), None)
+    if first is None:
+        return None
+    out, held = [], first
+    for _, _, v, a in samples:
+        h2 = v[0] * v[0] + v[1] * v[1]
+        if h2 >= v_min * v_min:
+            held = math.atan2(v[1], v[0])
+            rate = (v[0] * a[1] - v[1] * a[0]) / h2
+            out.append((held, max(-max_rate, min(max_rate, rate))))
+        else:
+            out.append((held, 0.0))
+    return out
+
+
 def summarize(samples) -> dict:
     """The numbers worth logging about a trajectory before flying it."""
     g = 9.80665

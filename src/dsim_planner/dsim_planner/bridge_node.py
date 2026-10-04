@@ -72,17 +72,27 @@ def load_plan(path, scenario=""):
     return plan
 
 
-def build_trajectory(control_points, start_s, sample_dt, yaw):
-    """A dsim_msgs/Trajectory from control points; pure, so it is testable."""
+def build_trajectory(control_points, start_s, sample_dt, yaw, yaw_mode="fixed"):
+    """A dsim_msgs/Trajectory from control points; pure, so it is testable.
+
+    yaw_mode "travel" points the nose along horizontal travel
+    (spacetime.travel_yaw) and falls back to the fixed `yaw` only for a plan
+    that never moves sideways; "fixed" flies `yaw` throughout.
+    """
+    if yaw_mode not in ("fixed", "travel"):
+        raise spacetime.PlanError(f"yaw_mode must be 'fixed' or 'travel', got {yaw_mode!r}")
     P = spacetime.validate(control_points)
     samples = spacetime.sample_uniform_in_time(P, sample_dt)
+    yaws = spacetime.travel_yaw(samples) if yaw_mode == "travel" else None
+    if yaws is None:
+        yaws = [(yaw, 0.0)] * len(samples)
     msg = Trajectory()
     sec = int(math.floor(start_s))
     msg.header.stamp.sec = sec
     msg.header.stamp.nanosec = int(round((start_s - sec) * 1e9))
     msg.header.frame_id = "world"
     t_origin = samples[0][0]
-    for t, p, v, a in samples:
+    for (t, p, v, a), (yaw_k, yaw_rate_k) in zip(samples, yaws):
         sp = TrajectorySetpoint()
         rel = t - t_origin
         sp.time_from_start.sec = int(math.floor(rel))
@@ -90,8 +100,8 @@ def build_trajectory(control_points, start_s, sample_dt, yaw):
         sp.position.x, sp.position.y, sp.position.z = p
         sp.velocity.x, sp.velocity.y, sp.velocity.z = v
         sp.acceleration.x, sp.acceleration.y, sp.acceleration.z = a
-        sp.yaw = yaw
-        sp.yaw_rate = 0.0
+        sp.yaw = yaw_k
+        sp.yaw_rate = yaw_rate_k
         msg.points.append(sp)
     return msg, samples
 
@@ -103,6 +113,9 @@ class BridgeNode(Node):
         self.start_s = float(self.declare_parameter("start_s", 10.0).value)
         sample_dt = float(self.declare_parameter("sample_dt_s", 0.02).value)
         yaw = float(self.declare_parameter("yaw_rad", 0.0).value)
+        # "travel" (default): nose along the path, so the forward depth camera
+        # sees where the vehicle is going. "fixed": yaw_rad throughout.
+        self.yaw_mode = str(self.declare_parameter("yaw_mode", "travel").value)
         period = float(self.declare_parameter("republish_period_s", 1.0).value)
         self.scenario = str(self.declare_parameter("scenario", "").value)
         if not plan_file:
@@ -145,7 +158,8 @@ class BridgeNode(Node):
         try:
             plan = load_plan(self.plan_file, self.scenario)
             msg, samples = build_trajectory(
-                plan["control_points"], self.start_s, self.sample_dt, self.yaw)
+                plan["control_points"], self.start_s, self.sample_dt, self.yaw,
+                self.yaw_mode)
         except (spacetime.PlanError, OSError, KeyError, TypeError,
                 json.JSONDecodeError) as exc:
             if self.msg is None:
