@@ -33,4 +33,7 @@ if(BUILD_TESTING)
   target_include_directories(test_obstacle PRIVATE include)
 endif()
 
+# Exported so dsim_depthcam can render the obstacles with THIS geometry rather
+# than a second copy of it.
+ament_export_include_directories(include)
 ament_package()
