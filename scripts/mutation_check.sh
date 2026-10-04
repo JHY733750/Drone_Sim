@@ -34,6 +34,9 @@ sources_dsim_estimation="src/attitude_filter.cpp src/velocity_filter.cpp"
 untestable_dsim_estimation=""
 sources_dsim_eval=""                                     # header-only geometry
 untestable_dsim_eval=""                                  # (the nodes are *_node.cpp)
+sources_dsim_slam="src/voxel_map.cpp src/registration.cpp src/gyro_buffer.cpp src/scan_odometry.cpp"
+untestable_dsim_slam=""                                  # cloud_conversion.hpp is header-only,
+                                                         # tested under colcon
 
 audit_sources() {   # $1 = package
   local pkg="$1" listed found missing=0
@@ -126,6 +129,7 @@ check_baseline dsim_simctl test/test_pacer.cpp    || baseline=BAD
 check_baseline dsim_time   test/test_sim_epoch.cpp || baseline=BAD
 check_baseline dsim_estimation test/test_estimation.cpp || baseline=BAD
 check_baseline dsim_eval   test/test_obstacle.cpp || baseline=BAD
+check_baseline dsim_slam   test/test_slam.cpp     || baseline=BAD
 if [ "$baseline" != "ALL_PASS" ]; then
   # Without this guard every mutation below is "caught" by the same build
   # failure, and the script reports teeth it does not have. That happened the
@@ -1065,6 +1069,104 @@ run_mutation "accel integral gain re-enabled (winds up in every turn)" \
   "include/dsim_estimation/attitude_filter.hpp" \
   "  double ki_accel {0.0};" \
   "  double ki_accel {0.01};"
+
+# ---------------------------------------------------------------------------
+# Depth-camera SLAM odometry. The tests fly a synthetic D435 through a
+# ray-cast world, so each of these is caught by what it does to a flight --
+# a frame flipped, a gyro ignored, a covariance that stops growing -- not by
+# a unit check written for it. Slow: every mutation re-flies ~1500 frames.
+# ---------------------------------------------------------------------------
+PKG=dsim_slam
+TEST=test/test_slam.cpp
+
+run_mutation "optical-to-body rotation transposed" \
+  "include/dsim_slam/lie.hpp" \
+  "  R << 0.0, 0.0, 1.0,     // body x  =  optical z  (forward)
+    -1.0, 0.0, 0.0,       // body y  = -optical x  (left = -right)
+    0.0, -1.0, 0.0;       // body z  = -optical y  (up = -down)" \
+  "  R << 0.0, -1.0, 0.0,
+    0.0, 0.0, -1.0,
+    1.0, 0.0, 0.0;"
+
+run_mutation "camera mount applied inverted" \
+  "src/scan_odometry.cpp" \
+  "    const Eigen::Vector3d pb = cfg_.T_base_sensor * ps;" \
+  "    const Eigen::Vector3d pb = cfg_.T_base_sensor.inverse() * ps;"
+
+run_mutation "gyro rotation composed in the world frame (dR R for R dR)" \
+  "src/scan_odometry.cpp" \
+  "  predicted.linear() = pose_.linear() * dR;" \
+  "  predicted.linear() = dR * pose_.linear();"
+
+run_mutation "gyro prior ignored (constant angular velocity only)" \
+  "src/scan_odometry.cpp" \
+  "  if (cfg_.use_imu_prior) {" \
+  "  if (false) {"
+
+run_mutation "gyro samples integrated in reverse order" \
+  "src/gyro_buffer.cpp" \
+  "    R = R * expSO3(samples_[i].w * (b - a));" \
+  "    R = expSO3(samples_[i].w * (b - a)) * R;"
+
+run_mutation "point-to-plane rotation Jacobian sign flipped" \
+  "src/registration.cpp" \
+  "    J.tail<3>() = (p - c).cross(m.normal);" \
+  "    J.tail<3>() = m.normal.cross(p - c);"
+
+run_mutation "rotation lever arm about the map origin, not the body" \
+  "src/registration.cpp" \
+  "    J.tail<3>() = (p - c).cross(m.normal);" \
+  "    J.tail<3>() = p.cross(m.normal);"
+
+run_mutation "motion prior dropped from the solve" \
+  "src/registration.cpp" \
+  "      A += prior->information;" \
+  "      A += 0.0 * prior->information;"
+
+run_mutation "degenerate directions left to the scan's noise" \
+  "src/registration.cpp" \
+  "    project(d0, &A, &g);" \
+  "    (void)d0;"
+
+run_mutation "covariance ignores the degenerate directions" \
+  "src/registration.cpp" \
+  "  project(d1, &info, nullptr);" \
+  "  (void)d1;"
+
+run_mutation "voxel mean unweighted (far noisy points count as much as near)" \
+  "src/voxel_map.cpp" \
+  "    const double w = 1.0 / variances[i];" \
+  "    const double w = 1.0;"
+
+run_mutation "held pose while LOST does not grow its covariance" \
+  "src/scan_odometry.cpp" \
+  "    cov_(i, i) += dvar_p;" \
+  "    cov_(i, i) += 0.0 * dvar_p;"
+
+run_mutation "registration covariance not accumulated" \
+  "src/scan_odometry.cpp" \
+  "  cov_ = F * cov_ * F.transpose() + reg.covariance;" \
+  "  cov_ = F * cov_ * F.transpose();"
+
+run_mutation "velocity filter never updated by the scan" \
+  "src/scan_odometry.cpp" \
+  "    x += G * innov;" \
+  "    (void)innov;"
+
+run_mutation "degeneracy never reported" \
+  "src/scan_odometry.cpp" \
+  "  if (dg.translation_min_eig < cfg_.degeneracy_translation_min) {" \
+  "  if (false) {"
+
+run_mutation "a silent camera never reported LOST" \
+  "src/scan_odometry.cpp" \
+  "  if (silent > cfg_.scan_timeout_s) {" \
+  "  if (false) {"
+
+run_mutation "clock going backwards not treated as a reset" \
+  "src/scan_odometry.cpp" \
+  "    if (t < last_t_ - 1.0) {" \
+  "    if (false) {"
 
 PKG=dsim_control
 TEST=test/test_control.cpp
