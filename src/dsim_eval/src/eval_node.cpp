@@ -77,6 +77,7 @@ public:
     scenario_start_s_ = declare_parameter("scenario.start_s", 0.0);
     scenario_duration_s_ = declare_parameter("scenario.duration_s", 0.0);
     scenario_name_ = declare_parameter("scenario.name", std::string(""));
+    scenario_loop_ = declare_parameter("scenario.loop", false);
 
     loadObstacles();
     tracker_ = std::make_unique<ClearanceTracker>(obstacles_, vehicle_radius_, stations_);
@@ -186,7 +187,10 @@ private:
     }
   }
 
-  double scenarioTime(double sim_s) const {return sim_s - scenario_start_s_;}
+  double scenarioTime(double sim_s) const
+  {
+    return dsim_eval::scenarioClock(sim_s, scenario_start_s_, scenario_duration_s_, scenario_loop_);
+  }
 
   static bool isDrone(const std::string & name)
   {
@@ -448,6 +452,7 @@ private:
   std::vector<std::array<double, 3>> stations_;
   std::unique_ptr<ClearanceTracker> tracker_;
   double scenario_start_s_ {0.0}, scenario_duration_s_ {0.0};
+  bool scenario_loop_ {false};
   std::string scenario_name_, nearest_;
   double vehicle_radius_, hover_power_w_, mass_, motor_constant_, publish_hz_;
   std::string csv_path_;

@@ -5,6 +5,12 @@
 //   /drone/control_debug  250 Hz  ->  /drone/viz/control_debug  30 Hz
 //   /drone/imu            250 Hz  ->  /drone/viz/imu            30 Hz
 //   <state_topic>         250 Hz  ->  /drone/viz/state          30 Hz
+//   /drone/tof             30 Hz  ->  /drone/viz/tof            30 Hz
+//   /drone/optical_flow    50 Hz  ->  /drone/viz/optical_flow   30 Hz
+//   /drone/estimator_debug        ->  /drone/viz/estimator_debug 30 Hz
+//
+// The last three feed the optical-flow display: where the rangefinder beam
+// lands, and the flow the estimator accepted next to the true ground motion.
 //
 // The last one is whichever Odometry the controller is flying on -- /drone/truth
 // or /drone/state_est, chosen by the state:= launch argument -- so a check can
@@ -40,7 +46,10 @@
 #include <rclcpp/rclcpp.hpp>
 #include <nav_msgs/msg/odometry.hpp>
 #include <sensor_msgs/msg/imu.hpp>
+#include <sensor_msgs/msg/range.hpp>
 #include <dsim_msgs/msg/control_debug.hpp>
+#include <dsim_msgs/msg/estimator_debug.hpp>
+#include <dsim_msgs/msg/optical_flow.hpp>
 #include <dsim_msgs/msg/trajectory_setpoint.hpp>
 
 namespace dsim_eval
@@ -104,6 +113,12 @@ public:
       this, "/drone/imu", "/drone/viz/imu");
     state_ = std::make_unique<LatestRelay<nav_msgs::msg::Odometry>>(
       this, state_topic, "/drone/viz/state");
+    tof_ = std::make_unique<LatestRelay<sensor_msgs::msg::Range>>(
+      this, "/drone/tof", "/drone/viz/tof");
+    flow_ = std::make_unique<LatestRelay<dsim_msgs::msg::OpticalFlow>>(
+      this, "/drone/optical_flow", "/drone/viz/optical_flow");
+    est_ = std::make_unique<LatestRelay<dsim_msgs::msg::EstimatorDebug>>(
+      this, "/drone/estimator_debug", "/drone/viz/estimator_debug");
 
     // Sim-clock timer, like every other periodic task here: if Gazebo runs
     // slower than real time, a wall timer would tick faster than simulated
@@ -116,10 +131,13 @@ public:
         debug_->tick();
         imu_->tick();
         state_->tick();
+        tof_->tick();
+        flow_->tick();
+        est_->tick();
       });
 
     RCLCPP_INFO(
-      get_logger(), "viz relay up: 5 topics decimated to %.0f Hz, controller state from %s",
+      get_logger(), "viz relay up: 8 topics decimated to %.0f Hz, controller state from %s",
       rate, state_topic.c_str());
   }
 
@@ -129,6 +147,9 @@ private:
   std::unique_ptr<LatestRelay<dsim_msgs::msg::ControlDebug>> debug_;
   std::unique_ptr<LatestRelay<sensor_msgs::msg::Imu>> imu_;
   std::unique_ptr<LatestRelay<nav_msgs::msg::Odometry>> state_;
+  std::unique_ptr<LatestRelay<sensor_msgs::msg::Range>> tof_;
+  std::unique_ptr<LatestRelay<dsim_msgs::msg::OpticalFlow>> flow_;
+  std::unique_ptr<LatestRelay<dsim_msgs::msg::EstimatorDebug>> est_;
   rclcpp::TimerBase::SharedPtr timer_;
 };
 

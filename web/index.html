@@ -85,7 +85,7 @@
   #gustpad { display: grid; grid-template-columns: repeat(3, 1fr); gap: 4px;
              margin: 6px 0; }
   #gustpad button { width: 100%; }
-  #gainrow, #speedrow, #gustrow { display: flex; justify-content: space-between;
+  #gainrow, #speedrow, #gustrow, #vmaxrow { display: flex; justify-content: space-between;
     color: #8b93a7; font-size: 10px; text-transform: uppercase;
     letter-spacing: .07em; margin-top: 6px; }
   #speed { width: 100%; accent-color: #f59e0b; }
@@ -195,16 +195,32 @@
        the Gazebo world is generated from it, so solving a different one would
        plan against obstacles that are not here. The bridge reloads the plan
        file by mtime, so a solve reaches the vehicle without a relaunch. -->
+  <!-- ONE speed cap, shared: the solve uses it as the optimiser's v max, a
+       drive run as the cap on every leg it flies. -->
+  <div id="vmaxrow"><span>v max</span><span id="vmaxval">1.5 m/s</span></div>
+  <input type="range" id="sV" min="0" max="5" step="0.1" value="1.5">
+  <!-- Drive runs only: the queue as the drive node reports it, and why the
+       last waypoint was refused if it was. -->
+  <div id="drivebox" hidden>
+    <label class="field">drive</label>
+    <div class="planline" id="driveline">—</div>
+    <div class="planline bad" id="driveerr"></div>
+    <button id="drivestop">stop &amp; clear queue</button>
+    <div class="hint">left-click the drone to select · right-click the ground for x,y,
+      then move for height (bar) and heading, right-click to send · shift+right-click
+      adds to the queue · left-click or Esc cancels</div>
+    <hr>
+  </div>
   <div id="solvebox" hidden>
     <label class="field">plan <span id="solvescen"></span></label>
     <div class="planline" id="planline">—</div>
     <div class="solvegrid">
       <label for="sN">degree N</label><input type="number" id="sN" value="8" min="2" max="20" step="1">
       <label for="sSeg">segments</label><input type="number" id="sSeg" value="2" min="1" max="16" step="1">
-      <label for="sV">v max m/s</label><input type="number" id="sV" value="3" min="0" max="20" step="0.5">
     </div>
-    <div class="hint">v max 0 means no cap. The optimiser has no acceleration
-      cap at all, so uncapped solves can demand more tilt than the vehicle has.</div>
+    <div class="hint">uses the v max slider above. 0 means no cap: the optimiser has
+      no acceleration cap at all, so uncapped solves can demand more tilt than the
+      vehicle has.</div>
     <button id="solve">solve &amp; fly</button>
     <pre id="solvelog" hidden></pre>
     <hr>

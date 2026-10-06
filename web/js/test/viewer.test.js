@@ -397,3 +397,83 @@ test("every scenario's landmarks in scene.json are drawn, all three kinds", () =
   }
   assert.deepEqual([...kinds].sort(), ["box", "cylinder", "sphere"]);
 });
+
+// ---- drive mode: picking and the click state machine ------------------------
+import { screenRay, rayPlaneZ, heightOnBar, headingAt, click } from "../drive.js";
+import { depthColour } from "../palette.js";
+
+// A camera at (-5, 0, 5) looking at the origin, built the way render.js
+// builds its view, plus render.js's own projection formula.
+function view45() {
+  const eye = [-5, 0, 5];
+  const fwd = unit([5, 0, -5]);
+  const right = unit(cross(fwd, [0, 0, 1]));
+  const up = cross(right, fwd);
+  return { eye, fwd, right, up, w: 800, h: 600, f: 400 };
+}
+function project(v, p) {
+  const d = [p[0] - v.eye[0], p[1] - v.eye[1], p[2] - v.eye[2]];
+  const z = d[0] * v.fwd[0] + d[1] * v.fwd[1] + d[2] * v.fwd[2];
+  const dr = d[0] * v.right[0] + d[1] * v.right[1] + d[2] * v.right[2];
+  const du = d[0] * v.up[0] + d[1] * v.up[1] + d[2] * v.up[2];
+  return { x: v.w / 2 + dr * v.f / z, y: v.h / 2 - du * v.f / z };
+}
+
+// FAILS IF: picking is not the inverse of drawing -- a point picked under the
+// cursor would not be the point drawn under it. Two independent computations
+// (project, then pick the ground under the projected pixel) must agree.
+test("picking the ground under a drawn point returns that point", () => {
+  const v = view45();
+  for (const p of [[0, 0, 0], [2, -1.5, 0], [-1, 3, 0]]) {
+    const q = project(v, p);
+    const g = rayPlaneZ(screenRay(v, q.x, q.y), 0);
+    assert.ok(len([g[0] - p[0], g[1] - p[1], g[2] - p[2]]) < 1e-9, `${g} vs ${p}`);
+  }
+});
+
+// FAILS IF: the height read off the bar is not the height drawn there.
+test("the height picked on the bar is the height under the cursor", () => {
+  const v = view45();
+  for (const z of [0.3, 1.2, 2.9]) {
+    const q = project(v, [1, 1, z]);
+    assert.ok(Math.abs(heightOnBar(screenRay(v, q.x, q.y), 1, 1) - z) < 1e-9);
+  }
+});
+
+// FAILS IF: the heading points away from the cursor, or jitters when the
+// cursor sits on the bar itself.
+test("the heading points from the bar toward the cursor, and holds near it", () => {
+  const v = view45();
+  const q = project(v, [3, 2, 1.5]);
+  const h = headingAt(screenRay(v, q.x, q.y), 1, 1, 1.5, 0);
+  assert.ok(Math.abs(h - Math.atan2(1, 2)) < 1e-9);
+  const on = project(v, [1.05, 1, 1.5]);
+  assert.equal(headingAt(screenRay(v, on.x, on.y), 1, 1, 1.5, 0.7), 0.7);
+});
+
+// FAILS IF: the clicks do something other than the user's scheme.
+test("the click scheme: select, right-click x,y, right-click to send, shift appends", () => {
+  let s = { mode: "idle" };
+  const ground = [2, 3, 0];
+  let r = click(s, { button: 2, ground });                         // idle right-click: nothing
+  assert.equal(r.state.mode, "idle"); assert.equal(r.send, null);
+  r = click(r.state, { button: 0, onDrone: true });                // select
+  assert.equal(r.state.mode, "selected");
+  r = click(r.state, { button: 2, ground, height: 1.0, heading: 0.5 });
+  assert.equal(r.state.mode, "height"); assert.equal(r.send, null);
+  r.state.z = 1.8;
+  const cancel = click(r.state, { button: 0 });                    // left-click cancels
+  assert.equal(cancel.state.mode, "selected"); assert.equal(cancel.send, null);
+  const go = click(r.state, { button: 2, shift: false });
+  assert.deepEqual(go.send, { op: "replace", p: [2, 3, 1.8], yaw: 0.5 });
+  assert.equal(go.state.mode, "selected");
+  const add = click(r.state, { button: 2, shift: true });
+  assert.equal(add.send.op, "append");
+  assert.equal(click({ mode: "selected" }, { button: 0, onDrone: false }).state.mode, "idle");
+});
+
+// FAILS IF: depth colours wrap, or near and far look alike.
+test("depth colour runs warm to cool and saturates past far", () => {
+  assert.notEqual(depthColour(0.3), depthColour(5.0));
+  assert.equal(depthColour(6.0), depthColour(60.0));
+});

@@ -110,8 +110,10 @@ def test_hover_and_circle_are_always_offered(ws):
     # them -- they are how you check the vehicle flies at all.
     for f in (ws / "plans").iterdir():
         f.unlink()
-    names = [r["name"] for r in Catalogue(str(ws)).runs()]
-    assert names == [r["name"] for r in REFERENCE_RUNS]
+    runs = Catalogue(str(ws)).runs()
+    assert [r["name"] for r in runs if r.get("reference") != "drive"] == \
+        [r["name"] for r in REFERENCE_RUNS]
+    assert not any(r.get("plan") for r in runs)
 
 
 def test_a_plan_for_a_missing_scenario_is_not_offered(ws):
@@ -463,3 +465,30 @@ def test_current_run_follows_the_file(ws, current):
     os.utime(target, ns=(stamp, stamp))      # the timestamp is no help here
     assert current.scenario == "fence3d"
     assert current.plan_file == str(ws / "plans" / "fence3d_seed.json")
+
+
+# ---- drive runs ------------------------------------------------------------
+def test_every_world_gets_a_drive_entry_without_a_plan(ws):
+    # FAILS IF: a scenario on disk is not offered for driving, or a drive
+    # entry carries a plan (two publishers on /drone/trajectory would take
+    # turns owning the vehicle).
+    runs = {r["name"]: r for r in Catalogue(str(ws)).runs()}
+    for w in ("empty", "wall", "fence3d", "loiter"):
+        r = runs[f"drive:{w}"]
+        assert r["world"] == w and r["reference"] == "drive" and not r.get("plan")
+
+
+def test_a_drive_run_launches_with_reference_drive(ws, current):
+    # FAILS IF: the drive entry is launched as a reference run with a circle's
+    # radius and period, or with a plan.
+    argv = mk(ws, current, Clock()).argv(Catalogue(str(ws)).by_name("drive:wall"))
+    assert "reference:=drive" in argv and "world:=wall" in argv
+    assert not any(a.startswith(("plan:=", "radius:=", "period:=")) for a in argv)
+
+
+def test_a_drive_run_is_named_after_its_world(ws, current):
+    # FAILS IF: every drive run reports itself as "drive" (the reference),
+    # which names no entry -- one drive entry exists per world.
+    write(ws / "web" / "current.json",
+          {"world": "fence3d", "reference": "drive", "plan": None})
+    assert mk(ws, current, Clock()).current_run_name() == "drive:fence3d"

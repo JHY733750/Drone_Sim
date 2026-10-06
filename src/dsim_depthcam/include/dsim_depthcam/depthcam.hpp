@@ -42,6 +42,7 @@
 // whatever order callbacks ran in -- a stronger promise than one generator
 // shared across a node's timers can make.
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <limits>
@@ -194,6 +195,11 @@ struct World
   /// referee's obstacles file: scenario t = sim t - start_s, exactly as
   /// dsim_eval's eval_node computes it.
   double scenario_start_s {0.0};
+  /// The referee's scenario.duration_s and scenario.loop: see
+  /// dsim_eval::scenarioClock. The camera must loop exactly when the referee
+  /// does, or it would draw obstacles the referee had already retired.
+  double scenario_duration_s {0.0};
+  bool scenario_loop {false};
 };
 
 /// The primitives present at a given SIM time. An obstacle outside its active
@@ -205,7 +211,8 @@ inline std::vector<Primitive> sceneAt(const World & w, double sim_time_s)
   out.reserve(w.landmarks.size() + w.obstacles.size() + 1);
   if (w.ground) {out.push_back(makePlane(w.ground_z));}
   out.insert(out.end(), w.landmarks.begin(), w.landmarks.end());
-  const double t = sim_time_s - w.scenario_start_s;
+  const double t = dsim_eval::scenarioClock(
+    sim_time_s, w.scenario_start_s, w.scenario_duration_s, w.scenario_loop);
   for (const auto & o : w.obstacles) {
     if (!o.activeAt(t)) {continue;}
     const auto c = o.centreAt(t);
@@ -341,6 +348,58 @@ inline Frame render(
     }
   }
   return f;
+}
+
+// ---- the viewer's preview ---------------------------------------------------
+//
+// NOT part of the camera's contract: realsense-ros publishes nothing like it,
+// and nothing that would run on the real vehicle may read it. It exists so a
+// person can watch the cloud in the browser, which cannot take 46,000 points
+// thirty times a second over a tailnet. Built here, from the very points the
+// cloud was built from, so the preview cannot show a different cloud.
+
+/// A point of the preview: where it is in the WORLD, and its depth (optical z,
+/// the camera's own measure) for colouring.
+struct PreviewPoint
+{
+  Eigen::Vector3d world;
+  double depth;
+};
+
+/// At most `max_points` of a frame's points, taken at an even stride through
+/// the row-major pixel order so the thinning is uniform over the image (a
+/// random pick would shimmer frame to frame; a crop would hide an edge), and
+/// moved into the world frame with the pose the frame was rendered from.
+inline std::vector<PreviewPoint> previewPoints(
+  const Frame & f, const Eigen::Isometry3d & T_world_optical, std::size_t max_points)
+{
+  std::vector<PreviewPoint> out;
+  if (max_points == 0 || f.points.empty()) {return out;}
+  const std::size_t stride = (f.points.size() + max_points - 1) / max_points;
+  out.reserve(f.points.size() / stride + 1);
+  for (std::size_t i = 0; i < f.points.size(); i += stride) {
+    out.push_back({T_world_optical * f.points[i], f.points[i].z()});
+  }
+  return out;
+}
+
+/// The camera's field of view as a pyramid: [apex, then the four far corners
+/// at `range_m` of optical depth, clockwise from top-left as seen by the
+/// camera]. In the world frame. From the same intrinsics the renderer casts
+/// its rays with, so the frustum drawn is the one that produced the cloud.
+inline std::array<Eigen::Vector3d, 5> frustumCorners(
+  const CameraConfig & c, const Eigen::Isometry3d & T_world_optical, double range_m)
+{
+  const auto k = intrinsics(c);
+  const double u[4] = {-0.5, c.width - 0.5, c.width - 0.5, -0.5};
+  const double v[4] = {-0.5, -0.5, c.height - 0.5, c.height - 0.5};
+  std::array<Eigen::Vector3d, 5> out;
+  out[0] = T_world_optical.translation();
+  for (int i = 0; i < 4; ++i) {
+    const Eigen::Vector3d ray((u[i] - k.cx) / k.fx, (v[i] - k.cy) / k.fy, 1.0);
+    out[i + 1] = T_world_optical * (ray * range_m);
+  }
+  return out;
 }
 
 }  // namespace dsim_depthcam

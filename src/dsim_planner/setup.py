@@ -19,6 +19,7 @@ setup(
     entry_points={
         'console_scripts': [
             'bridge_node = dsim_planner.bridge_node:main',
+            'drive_node = dsim_planner.drive_node:main',
         ],
     },
 )

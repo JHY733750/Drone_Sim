@@ -16,6 +16,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   msg/EstimatorDebug.msg
   msg/SimState.msg
   msg/ClearanceReport.msg
+  msg/DriveCommand.msg
   srv/ResetRun.srv
   srv/SimControl.srv
   DEPENDENCIES std_msgs geometry_msgs builtin_interfaces

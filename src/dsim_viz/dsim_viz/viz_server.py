@@ -42,10 +42,13 @@ Endpoints, all on one port and one origin:
     /control       POST: pause, playback speed, reset, gust  (see simcontrol.py)
     /solve         POST: re-solve the running scenario         (see solver.py)
     /launch        POST: switch which run the sim is flying    (see launcher.py)
+    /drive         POST: a waypoint for a drive run             (see driving.py)
+    /cloud         GET: the depth camera's preview cloud, compact (see cloud_of)
 
 Almost read-only. Every GET is. There are three write paths, kept apart on
 purpose: /control reaches the simulator, /solve reaches the planner, /launch
-cycles the simulator's launch, and none of them can do another's job.
+cycles the simulator's launch, /drive queues a waypoint, and none of them can
+do another's job.
 Widening /control to run the solver would have falsified the paragraph below
 while leaving it on the page. It forwards
 to one ROS service with four commands -- pause, toggle pause, speed, reset --
@@ -69,6 +72,7 @@ output -- but the write path leaves a record, because the last time it broke a
 run there was nothing to read afterwards and the sequence of events had to be
 reconstructed from the spacing of unrelated INFO lines.
 """
+import base64
 import json
 import math
 import os
@@ -78,15 +82,19 @@ from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 
 import rclpy
+from geometry_msgs.msg import PolygonStamped
 from nav_msgs.msg import Odometry
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, qos_profile_sensor_data
-from sensor_msgs.msg import Imu
+from sensor_msgs.msg import Imu, PointCloud2, Range
+from std_msgs.msg import String
 
-from dsim_msgs.msg import ClearanceReport, ControlDebug, FlightStatus, TrajectorySetpoint
+from dsim_msgs.msg import (ClearanceReport, ControlDebug, EstimatorDebug, FlightStatus,
+                           OpticalFlow, TrajectorySetpoint)
 from nav_msgs.msg import Path
 
 from . import overlay
+from .driving import DriveClient, DriveRefused
 from .launcher import CurrentRun, LaunchError, Launcher
 from .simcontrol import UNKNOWN, ControlError, SimControlClient
 from .solver import SolveError, Solver
@@ -133,6 +141,21 @@ class State:
         # disk changes without any message arriving here.
         self.solver_source = lambda: None
         self.launcher_source = lambda: None
+        self.drive_source = lambda: None
+        # The downward sensors, for the optical-flow display.
+        self.tof = None
+        self.flow = None
+        self.est = None
+        #: config/drone.yaml's flow envelope; set by main().
+        self.flow_band = None
+        # The depth camera's preview: NOT in the 30 Hz snapshot (a few
+        # thousand points thirty times a second is the cost this file exists
+        # to avoid) but served on its own at /cloud, built once per cloud.
+        self.cloud = None
+        self.frustum = None
+        self.cloud_seq = 0
+        self._cloud_cache = None
+        self._cloud_cache_seq = -1
         # Monotonic time the last FlightStatus arrived, or None if none ever
         # has. Read by the launcher to decide whether a run it started is up.
         self.status_at = None
@@ -154,8 +177,10 @@ class State:
                 # arrives on its own topic, so it is read fresh here.
                 return dict(self._cache, sim=self.sim_source(),
                             solver=self.solver_source(),
-                            launcher=self.launcher_source())
+                            launcher=self.launcher_source(),
+                            drive=self.drive_source(), cloud_seq=self.cloud_seq)
             seq, odom, sp = self.seq, self.odom, self.setpoint
+            tof, flow, est = self.tof, self.flow, self.est
             status, control, imu = self.status, self.control, self.imu
             consumed = self.consumed
             clearance, plan_path = self.clearance, self.plan_path
@@ -177,6 +202,9 @@ class State:
             "plan_path": _path_of(plan_path),
         }
         snap["overlay"] = overlay.build(snap["pose"], snap["control"], snap["imu"])
+        snap["flow"] = (overlay.flow_sensor(
+            snap["pose"], _tof_of(tof), _flow_of(flow), _est_of(est),
+            _world_velocity(odom), self.flow_band) if self.flow_band else None)
 
         with self.lock:
             # A message may have landed while we were converting; keeping the
@@ -185,12 +213,85 @@ class State:
             if self._cache_seq < seq:
                 self._cache, self._cache_seq = snap, seq
             snap = dict(snap, sim=self.sim_source(), solver=self.solver_source(),
-                        launcher=self.launcher_source())
+                        launcher=self.launcher_source(), drive=self.drive_source(),
+                        cloud_seq=self.cloud_seq)
         return snap
+
+    def cloud_json(self):
+        """The preview cloud, compact: int16 centimetres for x y z and uint16
+        millimetres of depth, base64. 3000 points is 24 KB of text instead of
+        the ~90 KB the same numbers cost as JSON floats. Built once per cloud,
+        however many pages poll."""
+        with self.lock:
+            if self._cloud_cache_seq == self.cloud_seq:
+                return self._cloud_cache
+            seq, cloud, frustum = self.cloud_seq, self.cloud, self.frustum
+        doc = cloud_of(cloud, frustum)
+        doc["seq"] = seq
+        with self.lock:
+            if self._cloud_cache_seq < seq:
+                self._cloud_cache, self._cloud_cache_seq = doc, seq
+        return doc
 
 
 def _stamp_seconds(m):
     return m.header.stamp.sec + 1e-9 * m.header.stamp.nanosec
+
+
+def _tof_of(m):
+    if m is None:
+        return None
+    return {"range": m.range, "min": m.min_range, "max": m.max_range, "fov": m.field_of_view}
+
+
+def _flow_of(m):
+    if m is None:
+        return None
+    return {"quality": int(m.quality), "ground_distance": m.ground_distance_m}
+
+
+def _est_of(m):
+    if m is None:
+        return None
+    return {"flow_velocity_world": _v3(m.flow_velocity_world)}
+
+
+def _world_velocity(m):
+    """The true velocity in the WORLD frame. /drone/truth's twist is in the
+    body frame (REP-145), so it is rotated here, once, by the pose it came
+    with -- the page must not do frame rotations."""
+    if m is None:
+        return None
+    q = m.pose.pose.orientation
+    return overlay.rotate(overlay.quat_matrix([q.w, q.x, q.y, q.z]),
+                          _v3(m.twist.twist.linear))
+
+
+def cloud_of(cloud, frustum):
+    """sensor_msgs/PointCloud2 (x, y, z, depth float32, world frame) -> the
+    compact form /cloud serves. Reads the field offsets from the message
+    rather than assuming them."""
+    out = {"n": 0, "xyz": "", "depth": "", "frustum": None, "t": None}
+    if frustum is not None:
+        out["frustum"] = [[round(p.x, 3), round(p.y, 3), round(p.z, 3)]
+                          for p in frustum.polygon.points]
+    if cloud is None or cloud.width * cloud.height == 0:
+        return out
+    import numpy as np
+    off = {f.name: f.offset for f in cloud.fields}
+    n = cloud.width * cloud.height
+    raw = np.frombuffer(bytes(cloud.data), dtype=np.uint8).reshape(n, cloud.point_step)
+
+    def col(name):
+        return raw[:, off[name]:off[name] + 4].copy().view("<f4").reshape(n)
+
+    xyz = np.stack([col("x"), col("y"), col("z")], axis=1)
+    cm = np.clip(np.round(xyz * 100.0), -32767, 32767).astype("<i2")
+    mm = np.clip(np.round(col("depth") * 1000.0), 0, 65535).astype("<u2")
+    out.update(n=int(n), xyz=base64.b64encode(cm.tobytes()).decode(),
+               depth=base64.b64encode(mm.tobytes()).decode(),
+               t=_stamp_seconds(cloud))
+    return out
 
 
 def _pose_of(m):
@@ -373,6 +474,16 @@ class VizNode(Node):
         # too or a page opened after the bridge started never sees the path.
         latched = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
         self.create_subscription(Path, "/drone/plan_path", self.on_plan_path, latched)
+        # The downward sensors, decimated to 30 Hz by viz_relay_node.
+        self.create_subscription(Range, "/drone/viz/tof", self.on_tof, qos_profile_sensor_data)
+        self.create_subscription(OpticalFlow, "/drone/viz/optical_flow", self.on_flow,
+                                 qos_profile_sensor_data)
+        self.create_subscription(EstimatorDebug, "/drone/viz/estimator_debug", self.on_est,
+                                 qos_profile_sensor_data)
+        # The depth camera's preview, already thinned and slowed (10 Hz, a few
+        # thousand points) by dsim_depthcam itself.
+        self.create_subscription(PointCloud2, "/camera/viz/points_world", self.on_cloud, 2)
+        self.create_subscription(PolygonStamped, "/camera/viz/frustum", self.on_frustum, 2)
 
     # Every callback does the same cheap thing: keep the newest message and
     # bump a counter. No parsing, no allocation, no arithmetic. At 250 Hz on
@@ -421,6 +532,30 @@ class VizNode(Node):
             self.state.imu = m
             self.state._bump()
 
+    def on_tof(self, m):
+        with self.state.lock:
+            self.state.tof = m
+            self.state._bump()
+
+    def on_flow(self, m):
+        with self.state.lock:
+            self.state.flow = m
+            self.state._bump()
+
+    def on_est(self, m):
+        with self.state.lock:
+            self.state.est = m
+            self.state._bump()
+
+    def on_cloud(self, m):
+        with self.state.lock:
+            self.state.cloud = m
+            self.state.cloud_seq += 1
+
+    def on_frustum(self, m):
+        with self.state.lock:
+            self.state.frustum = m
+
 
 class Handler(SimpleHTTPRequestHandler):
     state = None          # set via partial()
@@ -428,6 +563,7 @@ class Handler(SimpleHTTPRequestHandler):
     solver = None         # set via partial()
     logger = None         # set via partial(): the node's logger
     launcher = None       # set via partial()
+    driver = None         # set via partial()
     rate_hz = 30.0
 
     # Refuse a body larger than this outright. The only legitimate request is a
@@ -490,7 +626,7 @@ class Handler(SimpleHTTPRequestHandler):
         can express one name out of a catalogue read off disk.
         """
         route = self.path.split("?")[0]
-        if route not in ("/control", "/solve", "/launch"):
+        if route not in ("/control", "/solve", "/launch", "/drive"):
             self._json({"error": "not found"}, 404)
             return
         if route == "/control" and (self.sim_control is None or not self.sim_control.enabled):
@@ -500,6 +636,10 @@ class Handler(SimpleHTTPRequestHandler):
         if route == "/solve" and (self.solver is None or not self.solver.enabled):
             self._audit("refused", "solving disabled")
             self._json({"error": "this run has no plan to re-solve"}, 403)
+            return
+        if route == "/drive" and (self.driver is None or not self.driver.enabled):
+            self._audit("refused", "driving disabled")
+            self._json({"error": "driving is disabled"}, 403)
             return
         if route == "/launch" and (self.launcher is None or not self.launcher.enabled):
             self._audit("refused", "launching disabled")
@@ -540,10 +680,11 @@ class Handler(SimpleHTTPRequestHandler):
 
         routes = {"/control": lambda: self.sim_control.command(body),
                   "/solve": lambda: self.solver.solve(body),
-                  "/launch": lambda: self.launcher.launch(body)}
+                  "/launch": lambda: self.launcher.launch(body),
+                  "/drive": lambda: self.driver.command(body)}
         try:
             result = routes[route]()
-        except (ControlError, SolveError, LaunchError) as exc:
+        except (ControlError, SolveError, LaunchError, DriveRefused) as exc:
             # A refused request is a normal outcome, not a server fault: 400 so
             # the page can show the reason instead of a generic failure.
             self._audit("refused", f"{route} {body} — {exc}")
@@ -560,6 +701,9 @@ class Handler(SimpleHTTPRequestHandler):
             return
         if path == "/state":
             self._stream()
+            return
+        if path == "/cloud":
+            self._json(self.state.cloud_json())
             return
         super().do_GET()
 
@@ -639,7 +783,27 @@ def main():
                         status_at=lambda: state.status_at)
     state.launcher_source = lambda: launcher.state
 
+    # The drive write path, and the drive node's own account of its queue.
+    driver = DriveClient(node, enabled=bool(args.allow_control),
+                         is_drive_run=lambda: current.read().get("reference") == "drive")
+    latched_status = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
+    node.create_subscription(String, "/drone/drive_status", driver.on_status, latched_status)
+    state.drive_source = lambda: (driver.status if driver.is_drive_run() else None)
+
+    # The flow sensor's envelope, from the same config the sensors are built
+    # from: the page greys the beam out exactly where the sensor stops working.
+    try:
+        import yaml
+        with open(os.path.join(args.ws, "config", "drone.yaml")) as fh:
+            of = yaml.safe_load(fh)["drone"]["sensors"]["optical_flow"]
+        state.flow_band = {"min_h": float(of["min_height_m"]),
+                           "max_h": float(of["max_height_m"]),
+                           "max_tilt": float(of["max_tilt_rad"])}
+    except (OSError, KeyError, TypeError, ValueError, ImportError) as exc:
+        node.get_logger().warn(f"no optical-flow envelope ({exc}); flow display off")
+
     Handler.state = state
+    Handler.driver = driver
     Handler.sim_control = sim_control
     Handler.solver = solver
     Handler.launcher = launcher

@@ -24,8 +24,10 @@
 import { add, scale } from "./vec3.js";
 import { droneFaces, landmarkFaces, obstacleFaces, hitMarkers, sightLines, stationFaces }
   from "./shapes.js";
-import { GROUP_LABEL, LEGEND, PALETTE, TICK_COLOUR, colourFor, widthFor }
-  from "./palette.js";
+import { FLOW_COLOUR, FRUSTUM_COLOUR, GROUP_LABEL, LEGEND, PALETTE, TICK_COLOUR,
+  colourFor, depthColour, widthFor } from "./palette.js";
+import { clampHeight, click, headingAt, heightOnBar, hitsDrone, rayPlaneZ, screenRay }
+  from "./drive.js";
 import { Renderer } from "./render.js";
 import { Telemetry } from "./telemetry.js";
 import { extendTrail } from "./trail.js";
@@ -51,7 +53,18 @@ const S = {
   planPath: null,      // the planner's whole path, before it is flown
   flown: [],
   planned: [],
+  // Drive runs: the drive node's own account of its queue and bounds (null
+  // on any other run), the flow-sensor geometry, and the depth preview.
+  drive: null,
+  flowViz: null,
+  cloudSeq: 0,
+  cloud: { seq: -1, n: 0, xyz: null, depth: null, frustum: null },
 };
+
+/// What a click means right now: see drive.js. Page-local on purpose -- a
+/// selection is a fact about this tab, not about the vehicle.
+let pick = { mode: "idle" };
+let cursor = null;          // last pointer position, backing-store pixels
 
 /// How far the follow camera closes on the vehicle each frame. Not a snap:
 /// at 3 m/s the target would jitter with every noisy pose, and at loiter's
@@ -138,7 +151,38 @@ function ingest(snap) {
   if (snap.sim) S.sim = snap.sim;
   if (snap.solver !== undefined) S.solver = snap.solver;
   if (snap.launcher !== undefined) adoptRun(snap.launcher);
+  if (snap.drive !== undefined) {
+    S.drive = snap.drive;
+    if (!S.drive) pick = { mode: "idle" };
+  }
+  if (snap.flow !== undefined) S.flowViz = snap.flow;
+  if (typeof snap.cloud_seq === "number") S.cloudSeq = snap.cloud_seq;
 }
+
+// ---- the depth preview ---------------------------------------------------
+// Fetched on its own, at most 10 Hz and only when a new cloud exists and the
+// layer is shown: thousands of points do not belong in the 30 Hz stream.
+const b64 = (s, Type) => {
+  const bin = atob(s);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return new Type(bytes.buffer);
+};
+let cloudInflight = false;
+function pollCloud() {
+  if (cloudInflight || prefs.show.cloud === false || S.cloudSeq === S.cloud.seq) return;
+  cloudInflight = true;
+  fetch("/cloud").then((r) => r.json()).then((c) => {
+    const n = c.n || 0;
+    const cm = n ? b64(c.xyz, Int16Array) : new Int16Array(0);
+    const xyz = new Float32Array(cm.length);
+    for (let i = 0; i < cm.length; i++) xyz[i] = cm[i] / 100;
+    const mm = n ? b64(c.depth, Uint16Array) : new Uint16Array(0);
+    S.cloud = { seq: c.seq, n, xyz, depth: mm, frustum: c.frustum };
+  }).catch(() => { /* the next poll tries again */ })
+    .finally(() => { cloudInflight = false; });
+}
+setInterval(pollCloud, 100);
 
 /// Follow the simulator that is actually up.
 ///
@@ -296,6 +340,20 @@ function renderOnce() {
   faces.push(...droneFaces(S.pose, S.scene.drone));
   renderer.faces(faces);
 
+  // The depth cloud lands ON the obstacles, landmarks and floor; drawn after
+  // the faces so the points on a near surface are not painted over by it.
+  if (prefs.show.cloud !== false && S.cloud.n) {
+    const d = S.cloud.depth;
+    renderer.points(S.cloud.xyz, S.cloud.n, (i) => depthColour(d[i] / 1000));
+  }
+  if (prefs.show.cloud !== false && S.cloud.frustum) {
+    const [apex, ...c] = S.cloud.frustum;
+    renderer.segments(c.map((p) => ({ a: apex, b: p, colour: FRUSTUM_COLOUR })));
+    renderer.polyline([...c, c[0]], FRUSTUM_COLOUR, 1.5, false);
+  }
+  if (prefs.show.flow !== false && S.flowViz) drawFlow(S.flowViz);
+  drawDrive();
+
   // The sight lines, under the trails so a blocked one does not hide the path
   // that blocked it. Red means a station cannot see the vehicle -- a failure
   // that is invisible in a picture of clearances, because the vehicle can be
@@ -311,6 +369,61 @@ function renderOnce() {
   const draw = overlayToDraw();
   renderer.segments(draw.ticks);
   renderer.arrows(draw.arrows);
+}
+
+/// The downward sensors: the rangefinder beam (green while the flow sensor is
+/// inside its envelope, grey outside it), the patch it covers, and the ground
+/// motion the estimator accepted next to the true motion. All geometry from
+/// overlay.flow_sensor on the ROS side.
+function drawFlow(f) {
+  const beam = f.valid ? FLOW_COLOUR.beam_ok : FLOW_COLOUR.beam_bad;
+  renderer.polyline(f.beam, beam, 2, !f.in_range);
+  renderer.polyline(f.footprint, beam, 1.5, false);
+  const arrows = [];
+  if (f.truth) arrows.push({ from: f.truth[0], to: f.truth[1], colour: FLOW_COLOUR.truth,
+    width: 2, dashed: true, label: `true ${f.truth[2].toFixed(2)} m/s` });
+  if (f.measured) arrows.push({ from: f.measured[0], to: f.measured[1],
+    colour: FLOW_COLOUR.measured, width: 3, label: `flow ${f.measured[2].toFixed(2)} m/s` });
+  renderer.arrows(arrows);
+  if (!f.valid && f.why) renderer.label(f.beam[1], f.why, FLOW_COLOUR.beam_bad);
+}
+
+const DRIVE_COLOUR = { sel: "rgba(250,204,21,.95)", queue: "rgba(167,139,250,.9)",
+  bar: "rgba(250,204,21,.55)", cand: "rgba(250,204,21,.95)" };
+
+/// Selection, the queue still to fly (from the drive node), and height mode.
+function drawDrive() {
+  if (!S.drive) return;
+  const p = S.pose && S.pose.p;
+  if (pick.mode !== "idle" && p) renderer.ring([p[0], p[1], p[2]], 0.45, DRIVE_COLOUR.sel, 2.5);
+  const q = S.drive.queue || [];
+  if (q.length && p) {
+    renderer.polyline([p, ...q.map((w) => [w[0], w[1], w[2]])], DRIVE_COLOUR.queue, 2, true);
+    q.forEach((w, i) => {
+      const c = [w[0], w[1], w[2]];
+      renderer.ring(c, 0.15, DRIVE_COLOUR.queue, 2);
+      renderer.segments([{ a: c, b: [c[0] + 0.5 * Math.cos(w[3]), c[1] + 0.5 * Math.sin(w[3]), c[2]],
+        colour: DRIVE_COLOUR.queue }, { a: [c[0], c[1], 0.005], b: c, colour: "rgba(167,139,250,.35)" }]);
+      renderer.label(c, String(i + 1), DRIVE_COLOUR.queue);
+    });
+  }
+  if (pick.mode === "height") {
+    const b = S.drive.bounds;
+    const x = pick.x, y = pick.y;
+    renderer.segments([{ a: [x, y, 0], b: [x, y, b.z[1]], colour: DRIVE_COLOUR.bar }]);
+    const ticks = [];
+    for (let z = Math.ceil(b.z[0] * 2) / 2; z <= b.z[1] + 1e-9; z += 0.5) {
+      ticks.push({ a: [x - 0.12, y, z], b: [x + 0.12, y, z], colour: DRIVE_COLOUR.bar });
+    }
+    renderer.segments(ticks);
+    const c = [x, y, pick.z];
+    renderer.ring(c, 0.2, DRIVE_COLOUR.cand, 2.5);
+    renderer.arrows([{ from: c, to: [x + 0.8 * Math.cos(pick.heading), y + 0.8 * Math.sin(pick.heading), pick.z],
+      colour: DRIVE_COLOUR.cand, width: 3 }]);
+    if (p) renderer.polyline([p, c], DRIVE_COLOUR.bar, 1.5, true);
+    renderer.label(c, `${pick.z.toFixed(2)} m · ${(pick.heading * 180 / Math.PI).toFixed(0)}°`,
+      DRIVE_COLOUR.cand);
+  }
 }
 
 // ---- HUD -----------------------------------------------------------------
@@ -463,6 +576,7 @@ function updateHudOnce() {
 
   updateRunPanel();
   updateSolvePanel();
+  updateDrivePanel();
 
   const st = S.status;
   if (st) {
@@ -615,6 +729,18 @@ function updateSolvePanel() {
   line.className = p.flyable === false ? "planline bad" : "planline";
 }
 
+function updateDrivePanel() {
+  const v = Number(el("sV").value);
+  el("vmaxval").textContent = v > 0 ? `${v.toFixed(1)} m/s` : "no cap";
+  const box = el("drivebox");
+  if (!S.drive) { box.hidden = true; return; }
+  box.hidden = false;
+  const q = S.drive.queue || [];
+  const what = pick.mode === "height" ? "height mode" : pick.mode === "selected" ? "selected" : "click the drone";
+  el("driveline").textContent = `${what} · ${q.length} waypoint(s) queued · cap ${S.drive.v_max.toFixed(1)} m/s`;
+  if (S.drive.error) el("driveerr").textContent = S.drive.error;
+}
+
 // ---- controls ------------------------------------------------------------
 function buildControls() {
   const box = el("groups");
@@ -660,17 +786,28 @@ function bindInput() {
   window.addEventListener("resize", () => renderer.resize());
 
   let drag = null;
+  // Backing-store pixels, the units project() and the picking work in.
+  const toCanvas = (e) => {
+    const r = canvas.getBoundingClientRect();
+    return [(e.clientX - r.left) * renderer.px, (e.clientY - r.top) * renderer.px];
+  };
   canvas.addEventListener("pointerdown", (e) => {
     // Left drag orbits; right or middle drag pans, and so does shift+left
     // for a trackpad with one button. Shift alone was the only way before,
-    // and nothing on the page said so.
-    drag = { x: e.clientX, y: e.clientY, pan: e.shiftKey || e.button === 1 || e.button === 2 };
+    // and nothing on the page said so. A press that does not MOVE is a click,
+    // and on a drive run clicks select and send waypoints (see drive.js).
+    drag = { x: e.clientX, y: e.clientY, x0: e.clientX, y0: e.clientY, moved: false,
+             pan: (e.shiftKey && e.button === 0) || e.button === 1 || e.button === 2 };
     canvas.classList.add("dragging");
     canvas.setPointerCapture(e.pointerId);
   });
   canvas.addEventListener("contextmenu", (e) => e.preventDefault());
   canvas.addEventListener("pointermove", (e) => {
+    cursor = toCanvas(e);
+    if (pick.mode === "height") updateHeightPick();
     if (!drag) return;
+    if (!drag.moved && Math.hypot(e.clientX - drag.x0, e.clientY - drag.y0) < 5) return;
+    drag.moved = true;
     const dx = e.clientX - drag.x;
     const dy = e.clientY - drag.y;
     drag.x = e.clientX;
@@ -685,8 +822,15 @@ function bindInput() {
     }
   });
   const endDrag = () => { drag = null; canvas.classList.remove("dragging"); };
-  canvas.addEventListener("pointerup", endDrag);
+  canvas.addEventListener("pointerup", (e) => {
+    const wasClick = drag && !drag.moved;
+    endDrag();
+    if (wasClick && S.drive) driveClick(e.button, e.shiftKey, toCanvas(e));
+  });
   canvas.addEventListener("pointercancel", endDrag);
+  window.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && pick.mode === "height") pick = { mode: "selected" };
+  });
 
   const zoom = (factor) => {
     cam.dist = Math.max(0.8, Math.min(60, cam.dist * factor));
@@ -768,6 +912,8 @@ function bindInput() {
     };
   }
   el("gustclear").onclick = () => post({ clear_gust: true });
+
+  el("drivestop").onclick = () => sendDrive({ op: "clear" });
 
   el("reset").onclick = () => {
     cam = homeFor(S.scene && S.scene.worlds[S.world]);
@@ -859,6 +1005,44 @@ function bindInput() {
   };
 }
 
+// ---- drive: clicks to waypoints -----------------------------------------
+const yawOf = (q) => Math.atan2(2 * (q[0] * q[3] + q[1] * q[2]), 1 - 2 * (q[2] * q[2] + q[3] * q[3]));
+
+/// Height mode follows the cursor: the height is read off the vertical bar,
+/// the heading points from the bar toward the cursor at that height.
+function updateHeightPick() {
+  if (!cursor || !renderer.view || !S.drive) return;
+  const ray = screenRay(renderer.view, cursor[0], cursor[1]);
+  const z = heightOnBar(ray, pick.x, pick.y);
+  if (z !== null) pick.z = clampHeight(z, S.drive.bounds);
+  pick.heading = headingAt(ray, pick.x, pick.y, pick.z, pick.heading);
+}
+
+function driveClick(button, shift, at) {
+  const ray = screenRay(renderer.view, at[0], at[1]);
+  const ground = rayPlaneZ(ray, 0);
+  const onDrone = hitsDrone((p) => renderer.project(p), S.pose, at[0], at[1], 28 * renderer.px);
+  const z0 = clampHeight(S.pose ? S.pose.p[2] : 1.0, S.drive.bounds);
+  const out = click(pick, { button, shift, onDrone, ground, height: z0,
+    heading: S.pose ? yawOf(S.pose.q) : 0 });
+  pick = out.state;
+  if (pick.mode === "height") updateHeightPick();
+  if (out.send) sendDrive(out.send);
+}
+
+function sendDrive(body) {
+  const v = Number(el("sV").value);
+  if (v > 0) body.v_max = v;
+  fetch("/drive", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  }).then((r) => r.json()).then((r) => {
+    el("driveerr").textContent = r.error || "";
+    if (r.drive) S.drive = r.drive;
+  }).catch((e) => { el("driveerr").textContent = `drive: ${e.message}`; });
+}
+
 // ---- boot ----------------------------------------------------------------
 /// The static half of the scene: the drone's geometry, and per-world palettes
 /// and camera framing.
@@ -879,6 +1063,19 @@ function loadScene() {
       el("linktext").textContent = "scene.json missing";
     });
 }
+
+// A read-only handle for driving the page from a test harness (headless
+// Chrome over CDP): where things are drawn and what the click state is. It
+// exposes nothing that can write -- writes go through the endpoints like
+// any click does.
+window.dsimDebug = {
+  project: (p) => { const q = renderer.project(p); return [q.x / renderer.px, q.y / renderer.px]; },
+  pose: () => S.pose,
+  pick: () => ({ ...pick }),
+  drive: () => S.drive,
+  cloud: () => ({ n: S.cloud.n, seq: S.cloud.seq }),
+  flow: () => S.flowViz,
+};
 
 loadPrefs();
 buildControls();

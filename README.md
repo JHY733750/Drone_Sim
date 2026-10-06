@@ -39,6 +39,7 @@ Choosing what flies (all optional, combine freely):
 ```bash
 make viz REFERENCE=lemniscate RADIUS=2.0 PERIOD=6   # built-in path, no planner
 make viz REFERENCE=hover                             # sit still at ALTITUDE (1.5 m)
+make viz REFERENCE=drive WORLD=fence3d               # fly it yourself by clicking (below)
 make viz WORLD=fence3d PLAN=plans/fence3d_N8_seg2.json   # fly a solved plan
 make viz SRC_ATTITUDE=truth SRC_BODY_RATE=truth     # truth for some fields only
 ```
@@ -53,6 +54,26 @@ See docs/PLANNER.md, *Where a scenario sits*.
 `SRC_ATTITUDE`, `SRC_BODY_RATE` (`est` | `truth`) override one each — see
 *Choosing the state source* in [docs/INTERFACE.md](docs/INTERFACE.md). Truth
 there is the physics engine's exact state, `/drone/truth_exact`.
+
+**Drive runs** (`drive: <world>` in the scenario dropdown, or `REFERENCE=drive`):
+you are the planner. The world's obstacles move on a loop and its landmarks
+stand still, the simulated D435's point cloud and field of view are drawn
+coloured by depth, and the downward rangefinder and flow sensor are drawn too
+(green inside the flow sensor's height band, grey outside it, with the reason).
+
+| input | does |
+|---|---|
+| left-click the drone | select it |
+| left-click empty space | deselect |
+| right-click the ground | that x,y; then move the mouse to pick the height on the bar and the heading |
+| right-click again | send it: the drone goes there, stops, turns to the heading |
+| shift + right-click | add it to the queue instead of replacing the queue |
+| left-click or Esc | cancel the waypoint being placed |
+
+The **v max** slider caps every leg. A waypoint outside the world or outside
+0.3–3 m is refused, with the reason under the drive panel, never moved to the
+edge. Obstacles and landmarks are not solid: the drone flies through them and
+the referee counts the hit.
 
 Planner side:
 

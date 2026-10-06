@@ -29,7 +29,10 @@ export const GROUP_LABEL = {
   attitude: "attitude cmd",
   torque: "torque",
   command: "commands (pos/vel/att)",
+  cloud: "depth cloud + frustum",
+  flow: "flow sensor + rangefinder",
 };
+
 
 export const LEGEND = [
   ["thrust", "thrust"],
@@ -69,3 +72,33 @@ const WIDTH = {
   cmd_position: 2.5, cmd_velocity: 2.5,
 };
 export const widthFor = (arrow) => WIDTH[arrow.kind] || 3;
+
+/// The depth cloud's colour by DEPTH (the camera's own optical z, sent with
+/// each point): near warm, far cool, over the range the camera is worth
+/// anything at. Past `far` it stays at the far colour rather than wrapping.
+const DEPTH_STOPS = [
+  [0.0, [248, 113, 113]],   // red    -- right in front
+  [0.25, [251, 191, 36]],   // amber
+  [0.5, [74, 222, 128]],    // green
+  [0.75, [56, 189, 248]],   // sky
+  [1.0, [129, 140, 248]],   // indigo -- as far as it usefully sees
+];
+export function depthColour(depth, far = 6.0) {
+  const t = Math.max(0, Math.min(1, depth / far));
+  for (let i = 1; i < DEPTH_STOPS.length; i++) {
+    const [t1, c1] = DEPTH_STOPS[i];
+    if (t <= t1) {
+      const [t0, c0] = DEPTH_STOPS[i - 1];
+      return rgb(mix(c0, c1, (t - t0) / (t1 - t0)));
+    }
+  }
+  return rgb(DEPTH_STOPS[DEPTH_STOPS.length - 1][1]);
+}
+
+export const FLOW_COLOUR = {
+  beam_ok: "rgba(74,222,128,.9)",
+  beam_bad: "rgba(148,163,184,.55)",
+  measured: "#22d3ee",
+  truth: "rgba(230,232,239,.85)",
+};
+export const FRUSTUM_COLOUR = "rgba(250,204,21,.45)";

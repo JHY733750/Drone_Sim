@@ -584,3 +584,83 @@ TEST(Obstacles, TheMountPitchTiltsTheCameraDown)
     dsim_depthcam::sceneAt(g, 0), body(0, 0, 1.5), small(), Mount{V(0.1, 0, 0), 0.3});
   EXPECT_NEAR(centre(f), 1.5 / std::sin(0.3), 1e-9);
 }
+
+TEST(Obstacles, ALoopingScenarioRepeatsAndANonLoopingOneDoesNot)
+{
+  // The drive runs loop the scenario so the obstacles keep moving for as
+  // long as someone flies. Same cubic as above, window [1, 5] on a 10 s
+  // scenario starting at sim 5: sim 17.5 is scenario 12.5 -> 2.5 looped,
+  // which must put the obstacle exactly where sim 7.5 put it.
+  // Catches: loop ignored (absent at sim 17.5), the wrap taken on sim time
+  // instead of scenario time (off by start_s), looping before t = 0.
+  World w;
+  w.ground = false;
+  w.scenario_start_s = 5.0;
+  w.scenario_duration_s = 10.0;
+  w.obstacles.push_back(dsim_depthcam::obstacleFromFlat(
+      "B", "sphere", 0.5, {4, 0, 1.5, 1.0, 9, 0, 1.5, 7.0 / 3, 2, 0, 1.5, 11.0 / 3, 7, 0, 1.5, 5.0}));
+  const auto cam = body(0, 0, 1.5);
+  const double first = centre(shoot(dsim_depthcam::sceneAt(w, 7.5), cam, small()));
+  ASSERT_GT(first, 0.0);
+  EXPECT_EQ(centre(shoot(dsim_depthcam::sceneAt(w, 17.5), cam, small())), 0.0);  // no loop
+  w.scenario_loop = true;
+  EXPECT_NEAR(centre(shoot(dsim_depthcam::sceneAt(w, 17.5), cam, small())), first, 1e-9);
+  EXPECT_NEAR(centre(shoot(dsim_depthcam::sceneAt(w, 27.5), cam, small())), first, 1e-9);
+  // Before the scenario starts the clock is negative, looping or not.
+  EXPECT_EQ(centre(shoot(dsim_depthcam::sceneAt(w, 2.0), cam, small())), 0.0);
+}
+
+TEST(Preview, ThinnedPointsAreTheCloudsOwnPointsInTheWorldFrame)
+{
+  // A wall at x = 4, camera at x = 0.1 yawed 90 deg so the wall is at y = 4
+  // in its view... simpler: unyawed, the wall is a box face at world x = 4.
+  // Every preview point must lie ON the wall in WORLD coordinates (x = 4)
+  // and carry its optical depth (4 - 0.1). The count is capped and the
+  // stride uniform.
+  // Catches: points left in the optical frame (x would be ~0, z ~3.9), the
+  // transform inverted, depth taken as range, the cap ignored.
+  const auto wall = makeBox(V(4.5, 0, 1.5), V(1, 40, 40), 0.0);
+  const auto cam = body(0, 0, 1.5);
+  const auto T = dsim_depthcam::worldToOptical(cam, Mount{});
+  const auto f = dsim_depthcam::render({wall}, T, small(), 1);
+  ASSERT_EQ(f.points.size(), 41u * 31u);
+  const auto pts = dsim_depthcam::previewPoints(f, T, 100);
+  ASSERT_LE(pts.size(), 100u);
+  ASSERT_GE(pts.size(), 90u);
+  for (const auto & p : pts) {
+    EXPECT_NEAR(p.world.x(), 4.0, 1e-9);
+    EXPECT_NEAR(p.depth, 3.9, 1e-9);
+  }
+  // Spread over the image, not a crop: both ends of the y range appear.
+  double ymin = 1e9, ymax = -1e9;
+  for (const auto & p : pts) {ymin = std::min(ymin, p.world.y()); ymax = std::max(ymax, p.world.y());}
+  EXPECT_LT(ymin, -2.0);
+  EXPECT_GT(ymax, 2.0);
+  EXPECT_TRUE(dsim_depthcam::previewPoints(f, T, 0).empty());
+}
+
+TEST(Preview, TheFrustumIsTheRendersFieldOfView)
+{
+  // The far corners at range d must sit at the outer edge of the rendered
+  // image: a wall at optical depth d has its outermost pixels' points just
+  // inside the drawn corners, and the corner rays are the FOV the config
+  // says. Catches: half the FOV used, fx/fy swapped, corners in the optical
+  // frame, the apex not at the camera.
+  CameraConfig c = small();
+  c.hfov_rad = 80.0 * kPi / 180.0;
+  c.vfov_rad = 50.0 * kPi / 180.0;
+  const auto cam = body(1, 2, 1.5, 0.3);
+  const auto T = dsim_depthcam::worldToOptical(cam, Mount{});
+  const auto fr = dsim_depthcam::frustumCorners(c, T, 3.0);
+  EXPECT_LT((fr[0] - T.translation()).norm(), 1e-12);
+  for (int i = 1; i <= 4; ++i) {
+    const V local = T.inverse() * fr[i];          // back in the optical frame
+    EXPECT_NEAR(local.z(), 3.0, 1e-9);
+    EXPECT_NEAR(std::abs(std::atan2(local.x(), local.z())), 0.5 * c.hfov_rad, 1e-9);
+    EXPECT_NEAR(std::abs(std::atan2(local.y(), local.z())), 0.5 * c.vfov_rad, 1e-9);
+  }
+  // Top-left is up-left as the camera sees it: optical -x, -y.
+  const V tl = T.inverse() * fr[1];
+  EXPECT_LT(tl.x(), 0.0);
+  EXPECT_LT(tl.y(), 0.0);
+}

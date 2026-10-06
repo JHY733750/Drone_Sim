@@ -883,6 +883,18 @@ fi
 echo
 echo "injected planner-conversion bugs:"
 
+run_planner_mutation "travel yaw with atan2 arguments swapped" \
+  "            held = math.atan2(v[1], v[0])" \
+  "            held = math.atan2(v[0], v[1])"
+
+run_planner_mutation "travel yaw rate with the wrong sign" \
+  "            rate = (v[0] * a[1] - v[1] * a[0]) / h2" \
+  "            rate = -(v[0] * a[1] - v[1] * a[0]) / h2"
+
+run_planner_mutation "travel yaw faces 0 until the vehicle moves" \
+  "    out, held = [], first" \
+  "    out, held = [], 0.0"
+
 run_planner_mutation "dp/dtau reported as the velocity" \
   "    vel = [dp[i] / tdot for i in range(3)]" \
   "    vel = [dp[i] for i in range(3)]"
@@ -1450,10 +1462,21 @@ run_mutation "est body rate no longer low-passed" \
   "  gyro_(max_body_rate_rad_s, gyro_tau_s)," \
   "  gyro_(max_body_rate_rad_s, 0.0),"
 
-run_mutation "position=slam accepted although nothing feeds it" \
+run_mutation "position=slam flies on the estimate instead of /slam/odom" \
   "src/state_mux.cpp" \
-  "  if (s.position == Source::Slam) {" \
-  "  if (false) {"
+  "      return s == Source::Truth ? truth_ : s == Source::Slam ? slam_ : est_;" \
+  "      return s == Source::Truth ? truth_ : est_;"
+
+run_mutation "a quiet SLAM is reported as fresh (its age never grows)" \
+  "src/state_mux.cpp" \
+  "  return have_slam_ ? now - last_slam_s_ : std::numeric_limits<double>::infinity();" \
+  "  return have_slam_ ? 0.0 : std::numeric_limits<double>::infinity();"
+
+run_mutation "a reset keeps the old run's SLAM pose" \
+  "src/state_mux.cpp" \
+  "  have_slam_ = false;
+  last_truth_s_ = now;" \
+  "  last_truth_s_ = now;"
 
 run_mutation "an unknown source name falls back to est instead of being refused" \
   "src/state_mux.cpp" \
@@ -1486,8 +1509,8 @@ run_mutation "the gyro required even when body_rate=truth" \
 run_mutation "a reset forgets the truth stream but keeps the old estimate" \
   "src/state_mux.cpp" \
   "  have_est_ = false;
-  last_truth_s_ = now;" \
-  "  last_truth_s_ = now;"
+  have_slam_ = false;" \
+  "  have_slam_ = false;"
 
 PKG=dsim_truth
 TEST=test/test_truth.cpp

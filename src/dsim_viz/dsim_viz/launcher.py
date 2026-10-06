@@ -178,7 +178,8 @@ class Catalogue:
         key = (_dir_key(self.scenario_dir), _dir_key(self.plan_dir),
                _file_key(self.config))
         if key != self._key:
-            self._runs = tuple(REFERENCE_RUNS) + tuple(self._scenario_runs())
+            self._runs = (tuple(REFERENCE_RUNS) + tuple(self._drive_runs())
+                          + tuple(self._scenario_runs()))
             self._key = key
         return self._runs
 
@@ -208,6 +209,22 @@ class Catalogue:
         except (OSError, ValueError, KeyError, TypeError, ImportError):
             # No ceiling known means no claim made: fly on the default.
             return float("inf")
+
+    def _drive_runs(self):
+        """One "drive:" entry per world a person can fly by clicking: the empty
+        world, and every scenario on disk -- with its moving obstacles (looping)
+        and its landmarks, and no plan, because the person is the planner.
+        Derived from scenarios/ like the plan runs, never typed here."""
+        yield {"name": "drive:empty", "title": "drive: empty", "world": "empty",
+               "reference": "drive"}
+        try:
+            names = sorted(f[:-5] for f in os.listdir(self.scenario_dir)
+                           if f.endswith(".json"))
+        except OSError:
+            names = []
+        for n in names:
+            yield {"name": f"drive:{n}", "title": f"drive: {n}", "world": n,
+                   "reference": "drive"}
 
     def _plans_by_scenario(self):
         out = {}
@@ -370,7 +387,11 @@ class Launcher:
         combination of arguments this list does not offer.
         """
         doc = self.current.read()
-        name = doc.get("world") if doc.get("plan") else doc.get("reference")
+        if doc.get("reference") == "drive":
+            # One drive entry per world, so the world names it.
+            name = f"drive:{doc.get('world')}"
+        else:
+            name = doc.get("world") if doc.get("plan") else doc.get("reference")
         return name if name and self.catalogue.by_name(name) else None
 
     @property
@@ -406,6 +427,8 @@ class Launcher:
                 f"world:={run['world']}", "gui:=false", "viz:=true"]
         if run.get("plan"):
             argv.append(f"plan:={os.path.join(self.ws, run['plan'])}")
+        elif run.get("reference") == "drive":
+            argv.append("reference:=drive")
         else:
             argv += [f"reference:={run['reference']}",
                      f"radius:={run['radius']:g}",

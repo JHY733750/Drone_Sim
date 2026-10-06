@@ -355,3 +355,83 @@ def build(pose, control, imu):
             dashed=True))
 
     return {'arrows': arrows, 'ticks': ticks, 'readout': readout, 'scale': SCALE}
+
+
+# ---- the optical-flow sensor --------------------------------------------------
+#: Metres of arrow per m/s for the two ground-motion arrows. Their own scale,
+#: shared by both, so measured and true are directly comparable with each other.
+FLOW_M_PER_MPS = 0.5
+
+
+def flow_sensor(pose, tof, flow, est, vel_world, band):
+    """What the downward sensors see, as geometry: the rangefinder beam and
+    where it lands, the patch of ground it covers, and the ground motion the
+    estimator ACCEPTED from the flow sensor next to the true motion.
+
+    pose:      {"p": [x,y,z], "q": [w,x,y,z]} (truth, the vehicle's real pose)
+    tof:       {"range", "min", "max", "fov"} from the sensor_msgs/Range
+    flow:      {"quality", "ground_distance"} from dsim_msgs/OpticalFlow
+    est:       {"flow_velocity_world"} from dsim_msgs/EstimatorDebug
+    vel_world: the true world velocity
+    band:      {"min_h", "max_h", "max_tilt"} from config/drone.yaml
+
+    `valid` is the sensor envelope -- height band, tilt limit, a usable
+    reading -- and `why` says which limit failed, so a grey beam on the page
+    comes with a reason instead of a guess.
+    """
+    if pose is None or tof is None:
+        return None
+    m = quat_matrix(pose['q'])
+    p = pose['p']
+    down = rotate(m, [0.0, 0.0, -1.0])          # the beam, along body -z
+    tilt = math.acos(max(-1.0, min(1.0, -down[2])))
+    r = tof['range']
+    in_range = math.isfinite(r) and tof['min'] <= r <= tof['max']
+    reach = r if in_range else tof['max']
+    hit = _add(p, _mul(down, reach))
+    height = r * math.cos(tilt) if in_range else None
+
+    why = []
+    if not in_range:
+        why.append('no rangefinder return')
+    elif not band['min_h'] <= height <= band['max_h']:
+        why.append(f"height {height:.2f} m outside {band['min_h']:g}-{band['max_h']:g} m")
+    if tilt > band['max_tilt']:
+        why.append(f'tilt {math.degrees(tilt):.0f} deg over {math.degrees(band["max_tilt"]):.0f}')
+    if flow is not None and (flow['quality'] == 0 or not math.isfinite(flow['ground_distance'])):
+        why.append('flow reading unusable')
+    valid = not why
+
+    # The beam's footprint: the cone's circle where it meets the ground,
+    # approximated as horizontal (the beam is near-vertical inside the tilt
+    # limit, which is the only time the footprint means anything).
+    radius = reach * math.tan(0.5 * tof['fov'])
+    ring = [_round([hit[0] + radius * math.cos(a), hit[1] + radius * math.sin(a), hit[2] + 0.005])
+            for a in (2.0 * math.pi * k / 24 for k in range(25))]
+
+    out = {
+        'beam': [_round(p), _round(hit)],
+        'in_range': in_range,
+        'footprint': ring,
+        'height_m': None if height is None else round(height, 3),
+        'tilt_deg': round(math.degrees(tilt), 1),
+        'valid': valid,
+        'why': '; '.join(why),
+        'measured': None,
+        'truth': None,
+    }
+    base = _add(hit, [0.0, 0.0, 0.01])
+    if vel_world is not None:
+        v = [vel_world[0], vel_world[1], 0.0]
+        out['truth'] = [_round(base), _round(_add(base, _mul(v, FLOW_M_PER_MPS))),
+                        round(_norm(v), 3)]
+    # The estimator's flow_velocity_world is the last reading it ACCEPTED and
+    # is held, not cleared, when readings stop -- so outside the envelope it
+    # is a stale number, and drawing it would show the sensor "measuring"
+    # motion it can no longer see. Shown only while the sensor is valid.
+    if est is not None and valid:
+        fv = est['flow_velocity_world']
+        v = [fv[0], fv[1], 0.0]
+        out['measured'] = [_round(base), _round(_add(base, _mul(v, FLOW_M_PER_MPS))),
+                           round(_norm(v), 3)]
+    return out

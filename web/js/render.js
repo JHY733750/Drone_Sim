@@ -226,6 +226,45 @@ export class Renderer {
     ctx.restore();
   }
 
+  /// The depth cloud: n points, xyz a flat array of world metres, one colour
+  /// per point from colourOf(i). Squares, not circles -- a few thousand arcs a
+  /// frame is the expensive part of a 2D canvas, and at 2-3 px nobody can
+  /// tell. Nearer points are drawn slightly larger, so depth reads.
+  points(xyz, n, colourOf) {
+    const ctx = this.ctx;
+    const px = this.px;
+    for (let i = 0; i < n; i++) {
+      const q = this.project([xyz[3 * i], xyz[3 * i + 1], xyz[3 * i + 2]]);
+      if (q.depth <= NEAR) continue;
+      const s = Math.max(1.5, Math.min(4, 9 / q.depth)) * px;
+      ctx.fillStyle = colourOf(i);
+      ctx.fillRect(q.x - 0.5 * s, q.y - 0.5 * s, s, s);
+    }
+  }
+
+  /// A text label at a world point.
+  label(p, text, colour) {
+    const q = this.project(p);
+    if (q.depth <= NEAR) return;
+    const ctx = this.ctx;
+    ctx.save();
+    ctx.font = `${12 * this.px}px ui-sans-serif, -apple-system, system-ui, sans-serif`;
+    ctx.fillStyle = colour;
+    ctx.textBaseline = "middle";
+    ctx.fillText(text, q.x + 6 * this.px, q.y - 6 * this.px);
+    ctx.restore();
+  }
+
+  /// A horizontal ring at a world point, radius in metres.
+  ring(c, radius, colour, width = 2) {
+    const pts = [];
+    for (let i = 0; i <= 36; i++) {
+      const a = (i / 36) * Math.PI * 2;
+      pts.push([c[0] + radius * Math.cos(a), c[1] + radius * Math.sin(a), c[2]]);
+    }
+    this.polyline(pts, colour, width, false);
+  }
+
   /// The collision envelope, as a ring on the ground under the vehicle plus a
   /// drop line. This is the radius a planner has to keep clear, so it is worth
   /// seeing where it actually is rather than trusting a number in the HUD.

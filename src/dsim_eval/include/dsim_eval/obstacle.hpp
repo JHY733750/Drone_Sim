@@ -68,6 +68,19 @@ namespace dsim_eval
 /// distance.
 using ControlPoint = std::array<double, 4>;
 
+/// Scenario time from simulated time: t = sim - start_s, the one rule every
+/// node that places an obstacle uses. With `loop` (the drive runs, where a
+/// person flies the world for as long as they like) the scenario repeats
+/// every `duration_s` once it has started, so the obstacles keep moving
+/// instead of finishing their one pass and vanishing ten seconds in. Before
+/// start_s the clock is negative either way.
+inline double scenarioClock(double sim_s, double start_s, double duration_s, bool loop)
+{
+  const double t = sim_s - start_s;
+  if (!loop || duration_s <= 0.0 || t < 0.0) {return t;}
+  return std::fmod(t, duration_s);
+}
+
 struct Obstacle
 {
   std::string name;

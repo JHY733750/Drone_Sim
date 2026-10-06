@@ -47,6 +47,7 @@
 #include <vector>
 
 #include <rclcpp/rclcpp.hpp>
+#include <geometry_msgs/msg/polygon_stamped.hpp>
 #include <geometry_msgs/msg/transform_stamped.hpp>
 #include <nav_msgs/msg/odometry.hpp>
 #include <sensor_msgs/msg/camera_info.hpp>
@@ -118,6 +119,8 @@ public:
     const auto landmarks_file = declare_parameter("landmarks_file", std::string(""));
     world_.landmarks = loadLandmarks(landmarks_file);
     world_.scenario_start_s = declare_parameter("scenario.start_s", 0.0);
+    world_.scenario_duration_s = declare_parameter("scenario.duration_s", 0.0);
+    world_.scenario_loop = declare_parameter("scenario.loop", false);
     loadObstacles();
 
     // ---- I/O --------------------------------------------------------------
@@ -127,6 +130,19 @@ public:
     image_pub_ = create_publisher<sensor_msgs::msg::Image>(image_topic, rclcpp::QoS(10));
     info_pub_ = create_publisher<sensor_msgs::msg::CameraInfo>(info_topic, rclcpp::QoS(10));
     points_pub_ = create_publisher<sensor_msgs::msg::PointCloud2>(points_topic, rclcpp::QoS(10));
+    // The viewer's preview (see previewPoints in depthcam.hpp): a thinned
+    // copy of the cloud in the WORLD frame, plus the field-of-view pyramid.
+    // Not part of the realsense-ros contract; preview.rate_hz 0 turns it off.
+    preview_rate_hz_ = declare_parameter("preview.rate_hz", 10.0);
+    preview_max_points_ = static_cast<std::size_t>(
+      std::max<int64_t>(0, declare_parameter<int64_t>("preview.max_points", 3000)));
+    preview_range_m_ = declare_parameter("preview.frustum_range_m", 4.0);
+    if (preview_rate_hz_ > 0.0) {
+      preview_pub_ = create_publisher<sensor_msgs::msg::PointCloud2>(
+        "/camera/viz/points_world", rclcpp::QoS(2));
+      frustum_pub_ = create_publisher<geometry_msgs::msg::PolygonStamped>(
+        "/camera/viz/frustum", rclcpp::QoS(2));
+    }
     truth_sub_ = create_subscription<nav_msgs::msg::Odometry>(
       truth_topic, rclcpp::SensorDataQoS(),
       [this](nav_msgs::msg::Odometry::SharedPtr m) {onTruth(*m);});
@@ -168,6 +184,7 @@ private:
     if (epoch_.restarted(t)) {
       RCLCPP_INFO(get_logger(), "sim time went backwards (%.3f s): restarting the frame grid", t);
       next_frame_s_ = -1.0;
+      next_preview_s_ = -1.0;
     }
     if (!m.header.frame_id.empty() && m.header.frame_id != world_frame_ && !warned_frame_) {
       warned_frame_ = true;
@@ -186,10 +203,60 @@ private:
     T_world_base.translation() = Eigen::Vector3d(p.x, p.y, p.z);
 
     const rclcpp::Time stamp(m.header.stamp);
+    const Eigen::Isometry3d T_world_opt = worldToOptical(T_world_base, mount_);
     const auto frame = render(
-      sceneAt(world_, t), worldToOptical(T_world_base, mount_), cfg_,
-      frameSeed(seed_, stamp.nanoseconds()));
+      sceneAt(world_, t), T_world_opt, cfg_, frameSeed(seed_, stamp.nanoseconds()));
     publish(frame, m.header.stamp);
+    if (preview_pub_ && (next_preview_s_ < 0.0 || t >= next_preview_s_)) {
+      next_preview_s_ = t + 1.0 / preview_rate_hz_;
+      publishPreview(frame, T_world_opt, m.header.stamp);
+    }
+  }
+
+  void publishPreview(
+    const Frame & f, const Eigen::Isometry3d & T_world_opt,
+    const builtin_interfaces::msg::Time & stamp)
+  {
+    const auto pts = previewPoints(f, T_world_opt, preview_max_points_);
+    sensor_msgs::msg::PointCloud2 pc;
+    pc.header.stamp = stamp;
+    pc.header.frame_id = world_frame_;
+    pc.height = 1;
+    pc.width = static_cast<std::uint32_t>(pts.size());
+    pc.is_bigendian = false;
+    pc.is_dense = true;
+    pc.point_step = 16;
+    pc.row_step = pc.point_step * pc.width;
+    for (const auto & [name, offset] : {std::pair<const char *, std::uint32_t>{"x", 0},
+        {"y", 4}, {"z", 8}, {"depth", 12}})
+    {
+      sensor_msgs::msg::PointField fld;
+      fld.name = name;
+      fld.offset = offset;
+      fld.datatype = sensor_msgs::msg::PointField::FLOAT32;
+      fld.count = 1;
+      pc.fields.push_back(fld);
+    }
+    pc.data.resize(pc.row_step);
+    auto * out = reinterpret_cast<float *>(pc.data.data());
+    for (size_t i = 0; i < pts.size(); ++i) {
+      out[4 * i + 0] = static_cast<float>(pts[i].world.x());
+      out[4 * i + 1] = static_cast<float>(pts[i].world.y());
+      out[4 * i + 2] = static_cast<float>(pts[i].world.z());
+      out[4 * i + 3] = static_cast<float>(pts[i].depth);
+    }
+    preview_pub_->publish(pc);
+
+    geometry_msgs::msg::PolygonStamped fr;
+    fr.header = pc.header;
+    for (const auto & c : frustumCorners(cfg_, T_world_opt, preview_range_m_)) {
+      geometry_msgs::msg::Point32 q;
+      q.x = static_cast<float>(c.x());
+      q.y = static_cast<float>(c.y());
+      q.z = static_cast<float>(c.z());
+      fr.polygon.points.push_back(q);
+    }
+    frustum_pub_->publish(fr);
   }
 
   void publish(const Frame & f, const builtin_interfaces::msg::Time & stamp)
@@ -298,6 +365,12 @@ private:
   double rate_hz_ {30.0};
   std::uint64_t seed_ {1};
   double next_frame_s_ {-1.0};
+  double next_preview_s_ {-1.0};
+  double preview_rate_hz_ {10.0};
+  std::size_t preview_max_points_ {3000};
+  double preview_range_m_ {4.0};
+  rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr preview_pub_;
+  rclcpp::Publisher<geometry_msgs::msg::PolygonStamped>::SharedPtr frustum_pub_;
   bool warned_frame_ {false};
   bool publish_mount_tf_ {true};
   std::string base_frame_, link_frame_, depth_frame_, optical_frame_, world_frame_;

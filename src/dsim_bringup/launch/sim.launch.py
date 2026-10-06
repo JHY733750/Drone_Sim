@@ -149,6 +149,42 @@ def resolve_sources(state, overrides):
     return out
 
 
+def _drive_bounds(world, raw_cfg):
+    """Where a person may send the vehicle: [xlo, xhi, ylo, yhi, zlo, zhi].
+
+    Horizontally, the scenario's own extent -- start, end, every obstacle
+    control point and every landmark -- plus 2 m; the empty world gets 8 m
+    either way. Vertically, 0.3 m (clear of the floor) to the top of the
+    optical flow's band, read from the sensor config: above it the estimator
+    has no velocity aiding and the vehicle it is flying walks away.
+    """
+    xs, ys = [], []
+    scen = os.path.join(SCENARIO_DIR, f'{world}.json')
+    if os.path.exists(scen):
+        # scenarios/*.json is in the PLANNER's coordinates; the world, the
+        # landmarks and the vehicle are in the sim's (dsim_planner/frames.py).
+        # Measured: without this, fence3d's box started at x = -1.5 while the
+        # vehicle spawned at -4.5, and the takeoff was pulled 3 m sideways.
+        from dsim_planner import frames
+        with open(scen) as fh:
+            doc = frames.scenario_to_sim(json.load(fh))
+        for p in [doc['start'], doc['end']] + [cp for o in doc.get('obstacles', [])
+                                                for cp in o['control_points']]:
+            xs.append(float(p[0]))
+            ys.append(float(p[1]))
+    lm = os.path.join(CONFIG_DIR, f'landmarks_{world}.yaml')
+    if os.path.exists(lm):
+        for l in (_load_yaml(lm) or {}).get('landmarks', []):
+            xs.append(float(l['center'][0]))
+            ys.append(float(l['center'][1]))
+    if xs:
+        box = [min(xs) - 2.0, max(xs) + 2.0, min(ys) - 2.0, max(ys) + 2.0]
+    else:
+        box = [-8.0, 8.0, -8.0, 8.0]
+    ceiling = float(raw_cfg['sensors']['optical_flow']['max_height_m'])
+    return [round(v, 2) for v in box] + [0.3, ceiling]
+
+
 def _on_off(value, name, auto):
     """'true' | 'false' | 'auto' (auto -> the given default)."""
     if value == 'auto':
@@ -354,6 +390,13 @@ def launch_setup(context, *args, **kwargs):
     }]
     if os.path.exists(obstacles_file):
         eval_params.append(obstacles_file)
+    # drive: a person flies the world for as long as they like, so the
+    # scenario LOOPS (dsim_eval::scenarioClock) instead of making its one pass
+    # and retiring every obstacle ten seconds in. The camera gets the same
+    # flag below: it must loop exactly when the referee does.
+    drive = reference == 'drive'
+    if drive:
+        eval_params.append({'scenario.loop': True})
     referee = Node(
         package='dsim_eval', executable='eval_node', name='dsim_eval',
         output='screen', parameters=eval_params,
@@ -368,7 +411,7 @@ def launch_setup(context, *args, **kwargs):
     # and dsim_slam reads only that cloud, the IMU and TF -- it would run
     # unchanged on hardware. auto = on exactly when position=slam needs them.
     want_cam = _on_off(LaunchConfiguration('depthcam').perform(context), 'depthcam',
-                       sources['position'] == 'slam')
+                       sources['position'] == 'slam' or drive)
     want_slam = _on_off(LaunchConfiguration('slam').perform(context), 'slam',
                         sources['position'] == 'slam')
     if sources['position'] == 'slam' and not (want_cam and want_slam):
@@ -383,6 +426,8 @@ def launch_setup(context, *args, **kwargs):
             cam_params[0]['landmarks_file'] = landmarks_file
         if os.path.exists(obstacles_file):
             cam_params.append(obstacles_file)   # the referee's obstacles, same clock
+        if drive:
+            cam_params.append({'scenario.loop': True})
         nodes.append(Node(
             package='dsim_depthcam', executable='depthcam_node', name='dsim_depthcam',
             output='screen', parameters=cam_params,
@@ -424,8 +469,22 @@ def launch_setup(context, *args, **kwargs):
             output='screen', parameters=[_estimator_params(raw_cfg, vehicle)],
         ))
 
+    # ---- drive: a person's waypoints -----------------------------------------
+    # dsim_planner/drive_node.py turns the viewer's clicks into a trajectory.
+    # It reads the decimated /drone/viz/* topics, so it needs viz:=true -- which
+    # is how the viewer launches every run.
+    if drive:
+        if viz != 'true':
+            raise RuntimeError('reference:=drive needs viz:=true: the drive node '
+                               'reads the decimated /drone/viz/* topics')
+        nodes.append(Node(
+            package='dsim_planner', executable='drive_node', name='dsim_drive',
+            output='screen',
+            parameters=[{'use_sim_time': False,
+                         'bounds': _drive_bounds(world, raw_cfg)}],
+        ))
     # ---- optional built-in reference --------------------------------------
-    if reference != 'none':
+    elif reference != 'none':
         nodes.append(Node(
             package='dsim_control', executable='reference_generator_node',
             name='drone_reference_generator', output='screen',
