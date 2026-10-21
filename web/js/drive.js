@@ -2,13 +2,14 @@
 //
 //   left-click the drone        select it
 //   left-click empty space      deselect
-//   right-click (selected)      pick x,y on the ground, then HEIGHT MODE:
-//                                 a vertical bar over that spot; the cursor
-//                                 picks the height on it, and a heading bar
-//                                 at the point turns toward the cursor
-//   right-click (height mode)   commit: the waypoint REPLACES the queue,
-//                                 or with shift held is APPENDED to it
-//   left-click (height mode)    cancel that waypoint
+//   right-click (selected)      pick x,y on the ground -> HEIGHT step: a
+//                                 vertical bar over that spot, the cursor
+//                                 picks the height on it
+//   right-click (height)        fix the height -> HEADING step: a bar at
+//                                 the point turns toward the cursor
+//   right-click (heading)       send: the waypoint REPLACES the queue, or
+//                                 with shift held is APPENDED to it
+//   left-click (height/heading) cancel that waypoint
 //
 // This file decides what a click MEANS and turns a screen position into a
 // world point. It does not decide whether the point is allowed: the server
@@ -80,12 +81,15 @@ export function hitsDrone(project, pose, x, y, radius) {
   return Math.hypot(q.x - x, q.y - y) <= radius;
 }
 
-/// The click state machine. `mode` is "idle" | "selected" | "height".
+/// The click state machine. `mode` is "idle" | "selected" | "height" |
+/// "heading".
 /// Returns {state, send} where `send` is a /drive request body or null.
 export function click(state, ev) {
   // ev: {button: 0|2, shift, onDrone, ground: [x,y,z]|null, height, heading}
   if (ev.button === 0) {
-    if (state.mode === "height") return { state: { mode: "selected" }, send: null };
+    if (state.mode === "height" || state.mode === "heading") {
+      return { state: { mode: "selected" }, send: null };
+    }
     return { state: { mode: ev.onDrone ? "selected" : "idle" }, send: null };
   }
   if (ev.button !== 2) return { state, send: null };
@@ -98,6 +102,9 @@ export function click(state, ev) {
     };
   }
   if (state.mode === "height") {
+    return { state: { ...state, mode: "heading" }, send: null };
+  }
+  if (state.mode === "heading") {
     return {
       state: { mode: "selected" },
       send: { op: ev.shift ? "append" : "replace",

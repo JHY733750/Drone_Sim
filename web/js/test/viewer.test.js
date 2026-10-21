@@ -452,7 +452,7 @@ test("the heading points from the bar toward the cursor, and holds near it", () 
 });
 
 // FAILS IF: the clicks do something other than the user's scheme.
-test("the click scheme: select, right-click x,y, right-click to send, shift appends", () => {
+test("the click scheme: select, right-click x,y, height, heading-and-send, shift appends", () => {
   let s = { mode: "idle" };
   const ground = [2, 3, 0];
   let r = click(s, { button: 2, ground });                         // idle right-click: nothing
@@ -464,10 +464,15 @@ test("the click scheme: select, right-click x,y, right-click to send, shift appe
   r.state.z = 1.8;
   const cancel = click(r.state, { button: 0 });                    // left-click cancels
   assert.equal(cancel.state.mode, "selected"); assert.equal(cancel.send, null);
-  const go = click(r.state, { button: 2, shift: false });
-  assert.deepEqual(go.send, { op: "replace", p: [2, 3, 1.8], yaw: 0.5 });
+  const h = click(r.state, { button: 2, shift: false });           // height fixed, nothing sent
+  assert.equal(h.state.mode, "heading"); assert.equal(h.send, null);
+  assert.equal(h.state.z, 1.8);
+  assert.equal(click(h.state, { button: 0 }).state.mode, "selected");   // cancels here too
+  h.state.heading = -1.2;
+  const go = click(h.state, { button: 2, shift: false });
+  assert.deepEqual(go.send, { op: "replace", p: [2, 3, 1.8], yaw: -1.2 });
   assert.equal(go.state.mode, "selected");
-  const add = click(r.state, { button: 2, shift: true });
+  const add = click(h.state, { button: 2, shift: true });
   assert.equal(add.send.op, "append");
   assert.equal(click({ mode: "selected" }, { button: 0, onDrone: false }).state.mode, "idle");
 });

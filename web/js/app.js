@@ -407,7 +407,7 @@ function drawDrive() {
       renderer.label(c, String(i + 1), DRIVE_COLOUR.queue);
     });
   }
-  if (pick.mode === "height") {
+  if (pick.mode === "height" || pick.mode === "heading") {
     const b = S.drive.bounds;
     const x = pick.x, y = pick.y;
     renderer.segments([{ a: [x, y, 0], b: [x, y, b.z[1]], colour: DRIVE_COLOUR.bar }]);
@@ -418,10 +418,16 @@ function drawDrive() {
     renderer.segments(ticks);
     const c = [x, y, pick.z];
     renderer.ring(c, 0.2, DRIVE_COLOUR.cand, 2.5);
-    renderer.arrows([{ from: c, to: [x + 0.8 * Math.cos(pick.heading), y + 0.8 * Math.sin(pick.heading), pick.z],
-      colour: DRIVE_COLOUR.cand, width: 3 }]);
+    // The heading bar only on the heading step: on the height step there is
+    // no heading yet, and drawing one would suggest there were.
+    if (pick.mode === "heading") {
+      renderer.arrows([{ from: c, to: [x + 0.8 * Math.cos(pick.heading),
+        y + 0.8 * Math.sin(pick.heading), pick.z], colour: DRIVE_COLOUR.cand, width: 3 }]);
+    }
     if (p) renderer.polyline([p, c], DRIVE_COLOUR.bar, 1.5, true);
-    renderer.label(c, `${pick.z.toFixed(2)} m · ${(pick.heading * 180 / Math.PI).toFixed(0)}°`,
+    const hdg = pick.mode === "heading"
+      ? `${(pick.heading * 180 / Math.PI).toFixed(0)}°` : "—";
+    renderer.label(c, `x ${x.toFixed(2)}  y ${y.toFixed(2)}  z ${pick.z.toFixed(2)}  hdg ${hdg}`,
       DRIVE_COLOUR.cand);
   }
 }
@@ -736,7 +742,8 @@ function updateDrivePanel() {
   if (!S.drive) { box.hidden = true; return; }
   box.hidden = false;
   const q = S.drive.queue || [];
-  const what = pick.mode === "height" ? "height mode" : pick.mode === "selected" ? "selected" : "click the drone";
+  const what = { height: "pick height", heading: "pick heading", selected: "selected" }[pick.mode]
+    || "click the drone";
   el("driveline").textContent = `${what} · ${q.length} waypoint(s) queued · cap ${S.drive.v_max.toFixed(1)} m/s`;
   if (S.drive.error) el("driveerr").textContent = S.drive.error;
 }
@@ -804,7 +811,7 @@ function bindInput() {
   canvas.addEventListener("contextmenu", (e) => e.preventDefault());
   canvas.addEventListener("pointermove", (e) => {
     cursor = toCanvas(e);
-    if (pick.mode === "height") updateHeightPick();
+    if (pick.mode === "height" || pick.mode === "heading") updateHeightPick();
     if (!drag) return;
     if (!drag.moved && Math.hypot(e.clientX - drag.x0, e.clientY - drag.y0) < 5) return;
     drag.moved = true;
@@ -829,7 +836,9 @@ function bindInput() {
   });
   canvas.addEventListener("pointercancel", endDrag);
   window.addEventListener("keydown", (e) => {
-    if (e.key === "Escape" && pick.mode === "height") pick = { mode: "selected" };
+    if (e.key === "Escape" && (pick.mode === "height" || pick.mode === "heading")) {
+      pick = { mode: "selected" };
+    }
   });
 
   const zoom = (factor) => {
@@ -1008,14 +1017,19 @@ function bindInput() {
 // ---- drive: clicks to waypoints -----------------------------------------
 const yawOf = (q) => Math.atan2(2 * (q[0] * q[3] + q[1] * q[2]), 1 - 2 * (q[2] * q[2] + q[3] * q[3]));
 
-/// Height mode follows the cursor: the height is read off the vertical bar,
-/// the heading points from the bar toward the cursor at that height.
+/// The cursor drives the step in progress: on the HEIGHT step it is read off
+/// the vertical bar; on the HEADING step the height is fixed and the heading
+/// points from the bar toward the cursor at that height. One quantity per
+/// step, so moving to aim the heading cannot disturb the height.
 function updateHeightPick() {
   if (!cursor || !renderer.view || !S.drive) return;
   const ray = screenRay(renderer.view, cursor[0], cursor[1]);
-  const z = heightOnBar(ray, pick.x, pick.y);
-  if (z !== null) pick.z = clampHeight(z, S.drive.bounds);
-  pick.heading = headingAt(ray, pick.x, pick.y, pick.z, pick.heading);
+  if (pick.mode === "height") {
+    const z = heightOnBar(ray, pick.x, pick.y);
+    if (z !== null) pick.z = clampHeight(z, S.drive.bounds);
+  } else if (pick.mode === "heading") {
+    pick.heading = headingAt(ray, pick.x, pick.y, pick.z, pick.heading);
+  }
 }
 
 function driveClick(button, shift, at) {
@@ -1026,7 +1040,7 @@ function driveClick(button, shift, at) {
   const out = click(pick, { button, shift, onDrone, ground, height: z0,
     heading: S.pose ? yawOf(S.pose.q) : 0 });
   pick = out.state;
-  if (pick.mode === "height") updateHeightPick();
+  if (pick.mode === "height" || pick.mode === "heading") updateHeightPick();
   if (out.send) sendDrive(out.send);
 }
 

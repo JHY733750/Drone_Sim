@@ -93,26 +93,50 @@ def test_replanning_in_motion_starts_from_the_motion():
     assert yaw == pytest.approx(0.3)
 
 
-def test_heading_is_held_on_the_leg_and_turned_on_arrival():
-    # FAILS IF: the vehicle turns before it gets there, turns the long way, or
-    # ends on the wrong heading. The user's rule: between waypoints keep the
-    # heading of the one left; at a waypoint, turn to its own.
+def test_it_flies_through_waypoints_and_stops_only_at_the_last():
+    # FAILS IF: the vehicle stops at every waypoint (the user's rule: no
+    # stopping between waypoints), or does not pass through them at all.
+    wps = [([3.0, 0.0, 1.0], 0.0), ([6.0, 0.0, 1.0], 0.0), ([6.0, 3.0, 1.5], 1.0)]
+    samples, done = drive.plan(REST, wps, v_max=1.5)
+    for (wp, _), t in zip(wps, done):
+        s = min(samples, key=lambda x: abs(x[0] - t))
+        assert math.dist(s[1], wp) < 0.05
+    mid = [min(samples, key=lambda x: abs(x[0] - t)) for t in done[:-1]]
+    assert speed(mid[0][2]) > 1.0               # straight on through wp 1: near full speed
+    assert speed(mid[1][2]) > 0.2               # a 90 deg corner: slower, but moving
+    assert speed(mid[1][2]) <= 0.5 * 1.5 + 0.05      # half speed at 90 deg: (1 + cos)/2
+    assert speed(samples[-1][2]) == pytest.approx(0.0, abs=1e-9)
+    assert max(speed(x[2]) for x in samples) <= 1.5 * 1.002
+    assert max(speed(x[3]) for x in samples) <= drive.A_MAX * 1.002
+
+
+def test_heading_turns_while_moving_and_is_there_on_arrival():
+    # FAILS IF: the vehicle turns in place (stop-and-turn), holds the old
+    # heading the whole leg, turns the long way, or exceeds the rate cap.
     start = dict(REST, yaw=0.2)
-    samples, done = drive.plan(start, [([4.0, 0.0, 1.0], 3.0), ([4.0, 4.0, 1.0], -3.0)],
+    samples, done = drive.plan(start, [([4.0, 0.0, 1.0], 1.5), ([4.0, 4.0, 1.0], 3.0)],
                                v_max=1.5, yaw_rate=1.0)
     t1, t2 = done
-    first_leg = [s for s in samples if s[0] < t1 and math.dist(s[1], [4.0, 0.0, 1.0]) > 1e-6]
-    assert first_leg and all(s[4] == pytest.approx(0.2) for s in first_leg)
-    at_wp1 = [s for s in samples if s[0] <= t1 + 1e-9 and math.dist(s[1], [4.0, 0.0, 1.0]) < 1e-9]
-    assert at_wp1[-1][4] == pytest.approx(3.0, abs=1e-4)   # last grid sample of the turn
-    second_leg = [s for s in samples if t1 + 1e-6 < s[0] and math.dist(s[1], [4.0, 4.0, 1.0]) > 1e-6]
-    assert second_leg and all(s[4] == pytest.approx(3.0) for s in second_leg)
-    assert samples[-1][4] == pytest.approx(-3.0, abs=1e-9)
-    # 3.0 -> -3.0 is 0.28 rad the short way through pi, not 6 rad back: the
-    # turn is brief and its rate stays under the cap.
-    turn2 = [s for s in samples if s[0] > t1 and math.dist(s[1], [4.0, 4.0, 1.0]) < 1e-9]
-    assert turn2[-1][0] - turn2[0][0] < 1.0
+    first = [s for s in samples if s[0] <= t1]
+    halfway = min(first, key=lambda s: abs(s[0] - t1 / 2))
+    assert 0.2 + 0.3 < halfway[4] < 1.5 - 0.3          # mid-turn mid-leg
+    assert speed(halfway[2]) > 0.3                      # and moving while it turns
+    at1 = min(samples, key=lambda s: abs(s[0] - t1))
+    assert at1[4] == pytest.approx(1.5, abs=2e-3)
+    assert samples[-1][4] == pytest.approx(3.0, abs=1e-9)
     assert max(abs(s[5]) for s in samples) <= 1.0 * 1.002
+    # 3.0 -> -3.0 is 0.28 rad through pi, not 6 rad back the long way.
+    s2, _ = drive.plan(dict(REST, yaw=3.0), [([1.0, 0.0, 1.0], -3.0)], v_max=1.5)
+    ys = [s[4] for s in s2]
+    assert all(abs(drive.wrap(y - 3.0)) < 0.3 for y in ys)
+
+
+def test_a_short_leg_with_a_big_turn_is_slowed_to_fit_the_turn():
+    # FAILS IF: the leg ignores the yaw-rate cap and arrives mid-turn.
+    samples, done = drive.plan(REST, [([0.3, 0.0, 1.0], 3.0)], v_max=1.5, yaw_rate=0.5)
+    assert done[0] >= drive._MJ_V * 3.0 / 0.5 - 1e-9
+    assert max(abs(s[5]) for s in samples) <= 0.5 * 1.002
+    assert samples[-1][4] == pytest.approx(3.0)
 
 
 def test_an_emptied_queue_brakes_instead_of_stopping_dead():

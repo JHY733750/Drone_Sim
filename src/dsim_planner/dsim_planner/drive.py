@@ -7,7 +7,7 @@ the validation, and the trajectory -- so it is tested on the host.
 THE FLIGHT, leg by leg:
 
   * Each leg is a quintic in time from the state the leg starts in (position,
-    velocity, acceleration) to REST at the waypoint. A quintic matches all
+    velocity, acceleration) to the state it should pass the waypoint in. A quintic matches all
     three at both ends, so replacing the queue mid-flight bends the path
     smoothly instead of stepping the velocity the controller is asked for.
     Its duration is the shortest one, found by search, whose sampled speed
@@ -15,11 +15,13 @@ THE FLIGHT, leg by leg:
   * The leg is a STRAIGHT line only when it starts from rest; replanned in
     motion it curves from the old direction onto the new one, which is what
     "go there instead" ought to look like.
-  * On arrival the vehicle turns, in place, to the waypoint's heading
-    (minimum-jerk in angle, the short way round, capped at yaw_rate), and
-    only then starts the next leg. Between waypoints it keeps the heading of
-    the one it left -- the depth camera looks where that waypoint pointed it,
-    which is the point of giving a waypoint a heading at all.
+  * It flies THROUGH every waypoint but the last, without stopping: each is
+    passed at a velocity along the bisector of its two legs, slower the
+    sharper the turn (pass_velocity), and only the last is a stop.
+  * The heading turns WHILE it moves: over each leg, from the previous
+    waypoint's heading to this one's, minimum-jerk across the whole leg, the
+    short way round. A leg too short for its turn at yaw_rate is slowed until
+    the turn fits, so the vehicle never arrives still turning.
 
 A queue that empties while moving does not stop dead: it brakes to rest
 along the current direction of travel, over the distance a_max allows.
@@ -72,13 +74,14 @@ def check_waypoint(p, yaw, bounds):
 
 
 # ---- one leg ----------------------------------------------------------------
-def _quintic_axis(p0, v0, a0, p1, T):
+def _quintic_axis(p0, v0, a0, p1, v1, T):
     """Coefficients c0..c5 of p(t) = sum c_k t^k with p(0)=p0, p'(0)=v0,
-    p''(0)=a0, p(T)=p1, p'(T)=0, p''(T)=0."""
-    d = p1 - p0 - v0 * T - 0.5 * a0 * T * T
-    e = -v0 - a0 * T
-    f = -a0
+    p''(0)=a0, p(T)=p1, p'(T)=v1, p''(T)=0."""
     T2, T3, T4, T5 = T * T, T ** 3, T ** 4, T ** 5
+    # Residuals the cubic-and-up terms must make up at t = T.
+    d = p1 - p0 - v0 * T - 0.5 * a0 * T2
+    e = v1 - v0 - a0 * T
+    f = -a0
     c3 = (10.0 * d - 4.0 * e * T + 0.5 * f * T2) / T3
     c4 = (-15.0 * d + 7.0 * e * T - f * T2) / T4
     c5 = (6.0 * d - 3.0 * e * T + 0.5 * f * T2) / T5
@@ -93,11 +96,11 @@ def _eval(c, t):
 
 
 class Leg:
-    """p0 (v0, a0) -> p1 at rest, in T seconds."""
+    """p0 (v0, a0) -> p1 arriving at v1 with zero acceleration, in T seconds."""
 
-    def __init__(self, p0, v0, a0, p1, T):
+    def __init__(self, p0, v0, a0, p1, v1, T):
         self.T = T
-        self.c = [_quintic_axis(p0[i], v0[i], a0[i], p1[i], T) for i in range(3)]
+        self.c = [_quintic_axis(p0[i], v0[i], a0[i], p1[i], v1[i], T) for i in range(3)]
 
     def at(self, t):
         t = min(max(t, 0.0), self.T)
@@ -113,82 +116,112 @@ class Leg:
         return vmax, amax
 
 
-def make_leg(p0, v0, a0, p1, v_max, a_max):
-    """The shortest leg within v_max and a_max, or None if there is nothing
-    to fly (already there, at rest)."""
+def _norm(v):
+    return math.sqrt(sum(x * x for x in v))
+
+
+def make_leg(p0, v0, a0, p1, v1, v_max, a_max, min_T=0.0):
+    """The shortest leg within v_max and a_max (and no shorter than min_T),
+    or None if there is nothing to fly (already there, at rest)."""
     d = math.dist(p0, p1)
-    speed0 = math.sqrt(sum(x * x for x in v0))
-    if d < MIN_LEG_M and speed0 < 0.05:
+    speed0, speed1 = _norm(v0), _norm(v1)
+    if d < MIN_LEG_M and speed0 < 0.05 and speed1 < 0.05 and min_T <= 0.0:
         return None
     if not (v_max > 0.0 and a_max > 0.0):
         raise DriveError("v_max and a_max must be positive")
-    # Start from the rest-to-rest minimum and grow. A leg starting in motion
-    # may need longer (it has to shed that motion), never less than this.
+    # Start from the rest-to-rest minimum and grow. A leg starting or ending
+    # in motion may need longer, never less than this.
     T = max(_MJ_V * d / v_max, math.sqrt(_MJ_A * d / a_max), 0.3,
-            2.0 * speed0 / a_max)
+            abs(speed0 - speed1) / a_max, min_T)
     for _ in range(200):
-        leg = Leg(p0, v0, a0, p1, T)
+        leg = Leg(p0, v0, a0, p1, v1, T)
         vpk, apk = leg.peaks()
         if vpk <= v_max * 1.001 and apk <= a_max * 1.001:
             return leg
         T *= 1.08
     # Two hundred growths is a factor of 5e6: no leg needs that, so this is a
-    # start state the limits cannot reach (e.g. v_max below the speed the
-    # vehicle is already doing, with a_max too small to shed it). Say so.
+    # start state the limits cannot reach. Say so.
     raise DriveError(f"no leg to {p1} keeps within v_max {v_max:g} and a_max {a_max:g}")
 
 
-def _turn(y0, y1, rate):
-    """Minimum-jerk turn from y0 to y1 the short way: (T, f(t) -> yaw, yaw_rate)."""
+def _turn_over(y0, y1, T):
+    """Minimum-jerk heading from y0 to y1 the short way, spread over T s."""
     dpsi = wrap(y1 - y0)
-    if abs(dpsi) < 1e-6:
-        return 0.0, None
-    T = max(_MJ_V * abs(dpsi) / rate, 0.3)
 
     def f(t):
+        if T <= 0.0 or abs(dpsi) < 1e-9:
+            return wrap(y1), 0.0
         s = min(max(t / T, 0.0), 1.0)
         shape = s ** 3 * (10 - 15 * s + 6 * s * s)
         dshape = 30 * s * s * (1 - s) ** 2 / T
         return wrap(y0 + dpsi * shape), dpsi * dshape
-    return T, f
+    return f
+
+
+def pass_velocity(prev, here, nxt, v_max):
+    """The velocity to fly THROUGH waypoint `here` on the way from `prev` to
+    `nxt`: along the bisector of the two legs' directions, at a speed that
+    falls with the turn -- full v_max straight on, zero for a reversal --
+    and never more than either neighbouring leg could reach from rest in half
+    its length (a short hop must not be entered at full speed)."""
+    a = [here[i] - prev[i] for i in range(3)]
+    b = [nxt[i] - here[i] for i in range(3)]
+    la, lb = _norm(a), _norm(b)
+    if la < 1e-9 or lb < 1e-9:
+        return [0.0, 0.0, 0.0]
+    ua = [x / la for x in a]
+    ub = [x / lb for x in b]
+    cos_turn = sum(ua[i] * ub[i] for i in range(3))
+    bis = [ua[i] + ub[i] for i in range(3)]
+    lbis = _norm(bis)
+    if lbis < 1e-9:
+        return [0.0, 0.0, 0.0]
+    speed = v_max * 0.5 * (1.0 + cos_turn)
+    speed = min(speed, 0.5 * min(la, lb))     # ~1 s to cover half the shorter leg
+    return [speed * x / lbis for x in bis]
 
 
 # ---- the whole queue --------------------------------------------------------
 def plan(start, waypoints, v_max, a_max=A_MAX, yaw_rate=YAW_RATE, dt=DT):
-    """Samples for the controller, and when each waypoint is DONE.
+    """Samples for the controller, and when each waypoint is PASSED.
+
+    The vehicle flies THROUGH every waypoint but the last, at pass_velocity,
+    and comes to rest only at the last one. Over each leg the heading turns
+    from the previous waypoint's heading to this one's (minimum-jerk across
+    the whole leg), so the camera sweeps round as it goes; a leg too short
+    for its turn at yaw_rate is slowed until the turn fits.
 
     start: {"p": [x,y,z], "v": [...], "a": [...], "yaw": rad}
     waypoints: [([x,y,z], yaw), ...]
     Returns (samples, done) -- samples [(t, p, v, a, yaw, yaw_rate)] from t=0
     at `dt`, ending on the final instant exactly; done[i] = the time waypoint
-    i is reached AND turned to.
+    i is reached.
     """
-    pieces = []          # (duration, f(t) -> (p, v, a, yaw, yaw_rate))
-    done = []
     p, v, a, yaw = list(start["p"]), list(start["v"]), list(start["a"]), float(start["yaw"])
-    t_end = 0.0
 
-    if not waypoints and math.sqrt(sum(x * x for x in v)) > 0.05:
+    braking = False
+    if not waypoints and _norm(v) > 0.05:
         # Brake along the direction of travel: the queue emptied in motion.
-        speed = math.sqrt(sum(x * x for x in v))
-        stop = [p[i] + v[i] / speed * speed * speed / (2.0 * a_max) for i in range(3)]
+        speed = _norm(v)
+        stop = [p[i] + v[i] * speed / (2.0 * a_max) for i in range(3)]
         waypoints = [(stop, yaw)]
         braking = True
-    else:
-        braking = False
 
-    for wp, heading in waypoints:
-        leg = make_leg(p, v, a, wp, max(v_max, math.sqrt(sum(x * x for x in v))), a_max)
+    pieces = []          # (duration, f(t) -> (p, v, a, yaw, yaw_rate))
+    done = []
+    t_end = 0.0
+    for k, (wp, heading) in enumerate(waypoints):
+        nxt = waypoints[k + 1][0] if k + 1 < len(waypoints) else None
+        v1 = pass_velocity(p, wp, nxt, v_max) if nxt is not None else [0.0, 0.0, 0.0]
+        dpsi = abs(wrap(heading - yaw))
+        min_T = _MJ_V * dpsi / yaw_rate if dpsi > 1e-6 else 0.0
+        cap = max(v_max, _norm(v))     # a leg begun faster than the cap may slow down
+        leg = make_leg(p, v, a, wp, v1, cap, a_max, min_T)
         if leg is not None:
-            held = yaw
-            pieces.append((leg.T, lambda t, leg=leg, held=held: (*leg.at(t), held, 0.0)))
+            turn = _turn_over(yaw, heading, leg.T)
+            pieces.append((leg.T, lambda t, leg=leg, turn=turn: (*leg.at(t), *turn(t))))
             t_end += leg.T
-        p, v, a = list(wp), [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]
-        T, f = _turn(yaw, heading, yaw_rate)
-        if f is not None:
-            pieces.append((T, lambda t, f=f, p=p: (p, [0.0] * 3, [0.0] * 3, *f(t))))
-            t_end += T
-        yaw = heading
+        p, v, a, yaw = list(wp), v1, [0.0, 0.0, 0.0], wrap(heading)
         done.append(t_end)
 
     if braking:
